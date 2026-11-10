@@ -24,7 +24,7 @@ go test ./...                   # 单元 + 集成测试（内部通过官方 SDK
 go test -race ./...             # 竞态检测
 ```
 
-> module 路径为 `github.com/loglens/loglens`；发布到自己的 GitHub 仓库时改成你自己的账号路径即可。
+> module 路径为 `github.com/sun-crest/loglens`（已与远端仓库同步，上游跟踪 `origin/master`）。
 
 ## 运行模式
 
