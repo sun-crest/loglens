@@ -7,26 +7,21 @@ LogLens 是面向开发者与 AI Agent 的本地日志工作台，内置原生 M
 
 ✅ 核心特性
 - 时间范围切片查询（核心能力，区别于 tail / grep）
-- 原生支持普通日志、`.gz` 轮转日志
+- 原生支持普通日志、`.gz` 轮转日志（自动合并 `base.N[.gz]` 轮转组）
 - 内置安全限制：行数上限、字节上限、超时、日志目录白名单，防止 AI 裸读超大日志打满服务器
-- TUI 交互式界面，供人浏览、检索、高亮、保存查询模板 *(后续里程碑)*
-- 堆栈解析：Java / Go panic / C++ backtrace / FFmpeg 报错 *(后续里程碑)*
-- 支持按 traceId 跨文件聚合链路日志 *(后续里程碑)*
-- 两种运行模式：TUI 人工排查、MCP stdio 给 Claude Code 调用
+- 两种运行模式：MCP stdio 给 Claude Code 调用；TUI 人工排查（规划中，见路线图）
 
 Slogan：*Logs observed by humans and analyzed by agents.*
 
-## 构建与测试
+## 快速开始
+
+### 构建与测试
 
 ```bash
 go build ./cmd/loglens          # 生成二进制 loglens
 go test ./...                   # 单元 + 集成测试（内部通过官方 SDK 客户端走完整 MCP 握手）
 go test -race ./...             # 竞态检测
 ```
-
-> module 路径为 `github.com/sun-crest/loglens`（已与远端仓库同步，上游跟踪 `origin/master`）。
-
-## 运行模式
 
 ### MCP stdio（给 Claude Code）
 
@@ -40,26 +35,11 @@ LOGLENS_TIMEOUT_MS=15000 \
 
 ### TUI
 
-`loglens tui` 尚未实现（见路线图）。
-
-## 安全控制（强制）
-
-所有文件访问都经过白名单校验（含符号链接解析，防路径穿越 / 软链逃逸）；每次查询强制受限于：
-
-- `LOGLENS_WHITELIST_DIRS`：允许访问的日志目录，逗号分隔，**禁止访问白名单以外路径**
-- `LOGLENS_MAX_LINES`：单次查询最大返回行数
-- `LOGLENS_MAX_BYTES`：单次读取最大字节上限
-- `LOGLENS_TIMEOUT_MS`：单次查询超时，超时直接终止任务并返回已读取的部分
-
-## MCP Tools（MVP 已实现 3/7）
-
-1. `list_log_files`：列出白名单目录下日志文件，支持 glob、递归、识别 gz 轮转文件
-2. `get_log_slice`：按【起止时间 + 关键词 + 上下文行数】切片日志（核心，自动合并 `base.N[.gz]` 轮转组）
-3. `search_logs`：关键词 / 正则检索日志，支持排除关键词、忽略大小写、跨文件
-
-后续里程碑：`parse_stacktrace`、`aggregate_stats`、`get_trace_chain`、`get_recent_tail`。
+`loglens tui` 当前尚未实现，为后续里程碑（见 [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)）。
 
 ## Claude Code MCP 配置
+
+在 Claude Code 中注册 `loglens` 服务器：
 
 ```json
 {
@@ -77,6 +57,25 @@ LOGLENS_TIMEOUT_MS=15000 \
   }
 }
 ```
+
+## 安全上限速查
+
+所有文件访问都经过白名单校验（含符号链接解析，防路径穿越 / 软链逃逸）；每次查询强制受限于：
+
+- `LOGLENS_WHITELIST_DIRS`：允许访问的日志目录，逗号分隔，**禁止访问白名单以外路径**
+- `LOGLENS_MAX_LINES`：单次查询最大返回行数
+- `LOGLENS_MAX_BYTES`：单次读取最大字节上限
+- `LOGLENS_TIMEOUT_MS`：单次查询超时，超时直接终止任务并返回已读取的部分
+
+超过任一上限时不报错，而是返回**部分结果 + `truncated` 标记与原因**。
+
+## 当前 MCP 工具
+
+- `list_log_files`：列出白名单目录下日志文件，支持 glob、递归、识别 gz 轮转文件
+- `get_log_slice`：按【起止时间 + 关键词 + 上下文行数】切片日志（核心，自动合并 `base.N[.gz]` 轮转组）
+- `search_logs`：关键词 / 正则检索日志，支持排除关键词、忽略大小写、跨文件
+
+规划中的新工具见 [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)。
 
 ## 日志时间戳语义（重要）
 
@@ -96,14 +95,10 @@ loglens/
 │   ├── mcp/                  # MCP server（官方 go-sdk）、工具定义、schema
 │   ├── security/             # 白名单、路径解析防穿越、限额、超时
 │   └── tui/                  # (占位)
+├── docs/
+│   ├── REQUIREMENTS.md       # 需求与路线图（目标、非目标、里程碑）
+│   └── DESIGN.md             # 设计与实现（架构分层、关键技术决策）
 ├── testdata/logs/            # 冒烟测试夹具（普通 + gz 轮转 + Java 格式）
 ├── go.mod / go.sum
 └── README.md
 ```
-
-## 技术实现要点
-
-- 单二进制、纯 Go；`loglens mcp` 零第三方运行依赖（除官方 MCP SDK 的纯 Go 依赖，编译后仍为单一静态二进制）。
-- gz 日志流式解压（`compress/gzip`），绝不解压到磁盘；大文件懒加载 + `bufio` 分块读取。
-- 防御纵深：工具层把路径交给 `security.Resolve` 二次校验后才打开，轮转组的每个兄弟文件同样过检，防止轮转名被替换成符号链接逃逸。
-- 资源耗尽不返回错误而是返回**部分结果 + `truncated` 标记与原因**，让 Claude 知道停在哪一步、可以自行换参数重试。
