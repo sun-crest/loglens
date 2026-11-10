@@ -58,6 +58,32 @@ LOGLENS_TIMEOUT_MS=15000 \
 }
 ```
 
+### 配置放在哪里
+
+Claude Code 的 MCP 服务器可注册在三个作用域（均适用于本配置）：
+
+| 作用域 | 写入文件 | 生效范围 | 适用场景 |
+|---|---|---|---|
+| `project` | 项目根目录 `.mcp.json` | 所有打开该项目的人，可随 git 共享 | 团队共享 |
+| `user` | `~/.claude.json` 顶层 `mcpServers` | 自己 · 所有项目 | **个人日常使用（推荐）** |
+| `local`（默认） | `~/.claude.json` 的 `projects/<路径>` | 自己 · 仅当前目录 | 本仓库内调试 |
+
+- **个人用 → `user`**：一次注册，任何项目下都能让 Claude 用 loglens 查日志，且无 trust / 审批链路。
+- **团队共享 → `project`**：写入 `.mcp.json` 并提交 git。注意两点：首次链接会弹审批确认；批准后其中的 `command` 将以你的身份在本机执行，clone 来路不明的仓库时先审查其 `.mcp.json`。
+- **VS Code 扩展与 CLI 读同一批文件**，无独立入口；VS Code 自带的 `.vscode/mcp.json`（Copilot 原生格式）不被读取。
+
+等价于上方 JSON 的一条命令（`--scope user`）：
+
+```bash
+claude mcp add --scope user loglens -- loglens mcp \
+  -e LOGLENS_WHITELIST_DIRS=/var/log,/opt/service/logs \
+  -e LOGLENS_MAX_LINES=2000 \
+  -e LOGLENS_MAX_BYTES=10485760 \
+  -e LOGLENS_TIMEOUT_MS=15000
+```
+
+> **注意**：`command: "loglens"` 要求 `loglens` 已装入 PATH。否则请写绝对路径 `"command": "/path/to/loglens"`，或 `go build ./cmd/loglens && cp loglens ~/.local/bin/`。
+
 ## 安全上限速查
 
 所有文件访问都经过白名单校验（含符号链接解析，防路径穿越 / 软链逃逸）；每次查询强制受限于：
