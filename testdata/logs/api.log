@@ -1,0 +1,14 @@
+2026-11-10T12:00:00.123Z INFO api request id=a00 latency=0ms
+2026-11-10T12:00:01.123Z INFO api request id=a01 latency=100ms
+2026-11-10T12:00:02.123Z INFO api request id=a02 latency=200ms
+2026-11-10T12:00:03.123Z INFO api request id=a03 latency=300ms
+2026-11-10T12:00:04.123Z INFO api request id=a04 latency=400ms
+2026-11-10T12:00:05.123Z INFO api request id=a05 latency=500ms
+2026-11-10T12:00:06.123Z INFO api request id=a06 latency=600ms
+2026-11-10T12:00:07.123Z INFO api request id=a07 latency=700ms
+2026-11-10T12:00:08.123Z INFO api request id=a08 latency=800ms
+2026-11-10T12:00:09.123Z INFO api request id=a09 latency=900ms
+2026-11-10T12:01:00.001Z ERROR api request id=a05 failed status=500
+2026-11-10T12:01:05.500Z WARN api request id=a06 slow drain
+2026-11-10T12:02:30.200Z ERROR api panic: nil pointer dereference at worker.go:42
+2026-11-10T12:03:00.000Z INFO api startup complete

@@ -1,0 +1,5 @@
+2026-11-10 12:10:01,001 [main] INFO  App starting
+2026-11-10 12:10:02,002 [main] INFO  Web server up on 8080
+2026-11-10 12:10:03,003 [http-nio] ERROR java.lang.RuntimeException: boom
+2026-11-10 12:10:04,004 [http-nio] ERROR    at com.example.App.handle(App.java:10)
+2026-11-10 12:10:05,005 [http-nio] INFO  Request done
