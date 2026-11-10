@@ -1,6 +1,8 @@
 module github.com/sun-crest/loglens
 
-go 1.26.5
+go 1.27
+
+toolchain go1.27.3
 
 require github.com/modelcontextprotocol/go-sdk v1.8.0
 
