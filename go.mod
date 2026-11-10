@@ -1,4 +1,4 @@
-module github.com/loglens/loglens
+module github.com/sun-crest/loglens
 
 go 1.26.5
 

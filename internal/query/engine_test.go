@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/loglens/loglens/internal/logreader"
-	"github.com/loglens/loglens/internal/security"
+	"github.com/sun-crest/loglens/internal/logreader"
+	"github.com/sun-crest/loglens/internal/security"
 )
 
 const testTS = "2026-11-10T12:00:%02d.000Z"

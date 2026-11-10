@@ -7,7 +7,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/loglens/loglens/internal/security"
+	"github.com/sun-crest/loglens/internal/security"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

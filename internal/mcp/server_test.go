@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/loglens/loglens/internal/mcp"
-	"github.com/loglens/loglens/internal/security"
+	"github.com/sun-crest/loglens/internal/mcp"
+	"github.com/sun-crest/loglens/internal/security"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

@@ -9,9 +9,9 @@ import (
 	"log"
 	"os"
 
-	"github.com/loglens/loglens/internal/mcp"
-	"github.com/loglens/loglens/internal/security"
-	"github.com/loglens/loglens/internal/tui"
+	"github.com/sun-crest/loglens/internal/mcp"
+	"github.com/sun-crest/loglens/internal/security"
+	"github.com/sun-crest/loglens/internal/tui"
 )
 
 const version = "0.1.0"

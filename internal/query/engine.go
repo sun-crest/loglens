@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/loglens/loglens/internal/logreader"
-	"github.com/loglens/loglens/internal/parser"
-	"github.com/loglens/loglens/internal/security"
+	"github.com/sun-crest/loglens/internal/logreader"
+	"github.com/sun-crest/loglens/internal/parser"
+	"github.com/sun-crest/loglens/internal/security"
 )
 
 // Entry is a single returned log line (a hit or a context line).

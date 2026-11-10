@@ -7,7 +7,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/loglens/loglens/internal/security"
+	"github.com/sun-crest/loglens/internal/security"
 )
 
 // Run starts the interactive TUI. Not implemented yet.

@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/loglens/loglens/internal/logreader"
-	"github.com/loglens/loglens/internal/parser"
-	"github.com/loglens/loglens/internal/query"
-	"github.com/loglens/loglens/internal/security"
+	"github.com/sun-crest/loglens/internal/logreader"
+	"github.com/sun-crest/loglens/internal/parser"
+	"github.com/sun-crest/loglens/internal/query"
+	"github.com/sun-crest/loglens/internal/security"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
