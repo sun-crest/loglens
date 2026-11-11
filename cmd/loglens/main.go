@@ -5,9 +5,14 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/sun-crest/loglens/internal/mcp"
 	"github.com/sun-crest/loglens/internal/security"
@@ -23,6 +28,11 @@ func main() {
 		switch os.Args[1] {
 		case "mcp":
 			if err := runMCP(); err != nil {
+				log.Fatal(err)
+			}
+			return
+		case "serve":
+			if err := runServe(); err != nil {
 				log.Fatal(err)
 			}
 			return
@@ -54,6 +64,7 @@ func usage() {
 
 Usage:
   loglens mcp       Run the MCP stdio server (for Claude Code; default command)
+  loglens serve     Run the MCP Streamable HTTP server (remote access)
   loglens tui       Interactive TUI (not implemented yet)
   loglens version   Print the version
   loglens help      Show this help
@@ -64,8 +75,13 @@ Security configuration (environment variables):
   LOGLENS_MAX_BYTES        Max bytes read from disk per query      (default 10485760)
   LOGLENS_TIMEOUT_MS       Max wall-clock time per query (ms)      (default 15000)
 
+serve flags:
+  --addr   Listen address (default 127.0.0.1:8787; keep on loopback and expose via SSH tunnel)
+  --token  Optional bearer token; requires Authorization: Bearer <token> on every request
+
 Example:
   LOGLENS_WHITELIST_DIRS=/var/log,/opt/service/logs loglens mcp
+  LOGLENS_WHITELIST_DIRS=/var/log,/opt/service/logs loglens serve --addr 127.0.0.1:8787 --token secret
 `)
 }
 
@@ -87,6 +103,56 @@ func runMCP() error {
 		log.Printf("loglens: warning: whitelist directories do not exist (yet): %v", missing)
 	}
 	return mcp.Run(context.Background(), cfg, version)
+}
+
+// runServe exposes the MCP server over Streamable HTTP, so a local Claude Code
+// can reach logs on a remote host. Defaults to loopback only; cross-machine
+// access should go through an SSH tunnel, with --token enabled.
+func runServe() error {
+	cfg := loadConfigOrExit()
+
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	addr := fs.String("addr", "127.0.0.1:8787", "listen address (keep on loopback; expose via SSH tunnel)")
+	token := fs.String("token", "", "require Authorization: Bearer <token> on every request")
+	if err := fs.Parse(os.Args[2:]); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("serve: unexpected argument %q", fs.Arg(0))
+	}
+	if missing := missingWhitelistDirs(cfg); len(missing) > 0 {
+		log.Printf("loglens: warning: whitelist directories do not exist (yet): %v", missing)
+	}
+	if *token == "" {
+		log.Print("loglens: serve: no --token set; bind stays on loopback — do not publish the port without a token")
+	}
+
+	handler := mcp.NewHTTPHandler(cfg, version, mcp.HTTPOptions{Token: *token, Path: "/mcp"})
+	srv := &http.Server{
+		Addr:              *addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	log.Printf("loglens serve: Streamable MCP listening on http://%s/mcp", *addr)
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServe() }()
+
+	select {
+	case err := <-errCh:
+		if err != nil && err != http.ErrServerClosed {
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		log.Print("loglens serve: shutting down")
+		shCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return srv.Shutdown(shCtx)
+	}
 }
 
 func runTUI() error {

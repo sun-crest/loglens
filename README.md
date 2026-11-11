@@ -19,8 +19,15 @@ Slogan：*Logs observed by humans and analyzed by agents.*
 
 ```bash
 go build ./cmd/loglens          # 生成二进制 loglens
-go test ./...                   # 单元 + 集成测试（内部通过官方 SDK 客户端走完整 MCP 握手）
+go test ./...                   # 单元 + 集成测试（内部通过官方 SDK 客户端走完整 MCP 握手，stdio 与 HTTP 两套传输）
 go test -race ./...             # 竞态检测
+
+# serve 快速冒烟：起一个需要 token 的本地 MCP HTTP 端点
+LOGLENS_WHITELIST_DIRS=/tmp/logs loglens serve --addr 127.0.0.1:8787 --token dev
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer dev' \
+  -H 'Content-Type: application/json' \
+  -X POST http://127.0.0.1:8787/mcp \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
 ```
 
 ### MCP stdio（本地）
@@ -39,7 +46,7 @@ LOGLENS_TIMEOUT_MS=15000 \
 
 ## 远程部署（日志在服务器、Claude 在本地）
 
-主场景：Claude Code 在本地开发机，日志文件在远程服务器。做法：在远程主机上起常驻 `serve`，本机通过 HTTP 或 SSH 桥访问它（reM2 交付，下例为规划形态）。
+主场景：Claude Code 在本地开发机，日志文件在远程服务器。做法：在远程主机上起常驻 `serve`（Streamable HTTP，M2 已实现），本机通过 HTTP 或 SSH 桥访问它。
 
 ### 在远程主机启动 serve
 
@@ -166,7 +173,7 @@ claude mcp add --scope user loglens -- loglens mcp \
 
 ```
 loglens/
-├── cmd/loglens/main.go       # 入口，子命令：mcp（默认）/ tui / version
+├── cmd/loglens/main.go       # 入口，子命令：mcp（默认）/ serve / tui / version
 ├── internal/
 │   ├── logreader/            # 文件读取、gz 流式解析、懒加载、轮转组识别、列表
 │   ├── parser/               # 时间戳识别（zap/Java/JSON/标准/syslog）
