@@ -9,7 +9,7 @@ LogLens 是面向开发者与 AI Agent 的本地日志工作台，内置原生 M
 - 时间范围切片查询（核心能力，区别于 tail / grep）
 - 原生支持普通日志、`.gz` 轮转日志（自动合并 `base.N[.gz]` 轮转组）
 - 内置安全限制：行数上限、字节上限、超时、日志目录白名单，防止 AI 裸读超大日志打满服务器
-- 两种运行模式：MCP stdio 给 Claude Code 调用；TUI 人工排查（规划中，见路线图）
+- 两种运行模式：MCP（stdio 本地 / Streamable HTTP 远程）给 Claude Code 调用；TUI 人工排查（规划中，见路线图）
 
 Slogan：*Logs observed by humans and analyzed by agents.*
 
@@ -23,7 +23,7 @@ go test ./...                   # 单元 + 集成测试（内部通过官方 SDK
 go test -race ./...             # 竞态检测
 ```
 
-### MCP stdio（给 Claude Code）
+### MCP stdio（本地）
 
 ```bash
 LOGLENS_WHITELIST_DIRS=/var/log,/opt/service/logs \
@@ -36,6 +36,59 @@ LOGLENS_TIMEOUT_MS=15000 \
 ### TUI
 
 `loglens tui` 当前尚未实现，为后续里程碑（见 [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)）。
+
+## 远程部署（日志在服务器、Claude 在本地）
+
+主场景：Claude Code 在本地开发机，日志文件在远程服务器。做法：在远程主机上起常驻 `serve`，本机通过 HTTP 或 SSH 桥访问它（reM2 交付，下例为规划形态）。
+
+### 在远程主机启动 serve
+
+```bash
+LOGLENS_WHITELIST_DIRS=/var/log,/opt/service/logs \
+LOGLENS_MAX_LINES=2000 LOGLENS_MAX_BYTES=10485760 LOGLENS_TIMEOUT_MS=15000 \
+  loglens serve --addr 127.0.0.1:8787 --token your-secret
+```
+
+- 默认只监听本机回环，**不暴露到网络**；跨机访问请走 SSH 隧道（见下）。
+- `--token`（可选）：要求每个请求带 `Authorization: Bearer <token>`；即使走 SSH 隧道也建议开启。
+- TLS 不内置：公网直连请用 nginx 等前置代理终结 TLS。
+
+### 本地连接
+
+**方式 1 · SSH 隧道 + HTTP（推荐，常驻）**：先把远程端口映射到本机（保持前台或后台运行）：
+
+```bash
+ssh -N -L 8787:127.0.0.1:8787 user@your-server
+```
+
+然后在 Claude Code 注册远程服务器：
+
+```json
+{
+  "mcpServers": {
+    "loglens-remote": {
+      "type": "http",
+      "url": "http://127.0.0.1:8787/mcp",
+      "headers": {
+        "Authorization": "Bearer your-secret"
+      }
+    }
+  }
+}
+```
+
+**方式 2 · stdio 桥（零部署、无常驻）**：让本地进程就是一次 SSH 调用，stdin/stdout 桥接到远程的 `loglens mcp`（远程主机需把 `loglens` 装入 PATH，`LOGLENS_*` 环境变量在远程设置）：
+
+```json
+{
+  "mcpServers": {
+    "loglens-remote": {
+      "command": "ssh",
+      "args": ["user@your-server", "loglens", "mcp"]
+    }
+  }
+}
+```
 
 ## Claude Code MCP 配置
 
