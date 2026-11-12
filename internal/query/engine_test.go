@@ -409,6 +409,188 @@ func TestSeekHandlesEarlyStart(t *testing.T) {
 	}
 }
 
+// TestPerFileScanMeta asserts that results carry per-file coverage: after a
+// seeked time-slice the FileScan records BytesTotal, a nonzero SeekOffset,
+// scanned timestamps and completion.
+func TestPerFileScanMeta(t *testing.T) {
+	cfg, dir := newCfg(t)
+	file := filepath.Join(dir, "meta.log")
+	bigLog(t, file, 300, 1200) // ~360 KB, comfortably within the 10 MiB budget
+
+	start := time.Date(2026, 11, 10, 12, 2, 0, 0, time.UTC)
+	end := time.Date(2026, 11, 10, 12, 4, 0, 0, time.UTC)
+	res := mustRun(t, Options{Policy: cfg, Limits: cfg.Limits, Files: []string{file},
+		HasBounds: true, Start: start, End: end})
+
+	if len(res.PerFile) != 1 {
+		t.Fatalf("per_file = %d entries, want 1", len(res.PerFile))
+	}
+	ps := res.PerFile[0]
+	if ps.File != file {
+		t.Errorf("per_file.file = %q", ps.File)
+	}
+	if ps.BytesTotal <= 0 {
+		t.Errorf("BytesTotal = %d, want > 0", ps.BytesTotal)
+	}
+	if ps.BytesRead <= 0 {
+		t.Errorf("BytesRead = %d, want > 0", ps.BytesRead)
+	}
+	if !ps.Complete {
+		t.Error("Complete = false, want true (whole file within budget)")
+	}
+	if ps.SeekOffset <= 0 {
+		t.Errorf("SeekOffset = %d, want > 0 (window is past the file head)", ps.SeekOffset)
+	}
+	if ps.ScannedFrom == nil {
+		t.Error("ScannedFrom nil")
+	} else if *ps.ScannedFrom > "2026-11-10T12:04:00Z" {
+		t.Errorf("ScannedFrom = %s, want before window end", *ps.ScannedFrom)
+	}
+}
+
+// TestPerFileBudget verifies per_file_budget: with several files, each gets
+// its own MaxBytes instead of the first (largest) file consuming everything.
+// Uses bounds so both files go through the full-file path (tail would only
+// look at the newest file).
+func TestPerFileBudget(t *testing.T) {
+	cfg, dir := newCfg(t)
+	lim := cfg.Limits
+	lim.MaxBytes = 2 << 10 // tiny: 2 KiB per file
+	cfg2 := &security.Config{Dirs: cfg.Dirs, Limits: lim}
+
+	// fileA is just under the budget (1.5 KiB); fileB is also small. With a
+	// shared budget, scanning A would leave almost nothing for B; with
+	// per-file budget both are fully scanned.
+	writeLine := func(path string, n int) {
+		var sb strings.Builder
+		for i := 0; i < n; i++ {
+			sb.WriteString(strings.Repeat("y", 50) + "\n")
+		}
+		if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := filepath.Join(dir, "a.log")
+	b := filepath.Join(dir, "b.log")
+	writeLine(a, 25) // 25*51 ≈ 1275 B
+	writeLine(b, 25)
+
+	res := mustRun(t, Options{Policy: cfg2, Limits: lim, Files: []string{a, b},
+		Keywords: []string{"yyyy"}, PerFileBudget: true,
+		HasBounds: true,
+		Start:     time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+		End:       time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)})
+	if len(res.PerFile) != 2 {
+		t.Fatalf("per_file = %d, want 2", len(res.PerFile))
+	}
+	for i, ps := range res.PerFile {
+		if !ps.Complete {
+			t.Errorf("file %d (%s) not complete: read=%d/%d", i, ps.File, ps.BytesRead, ps.BytesTotal)
+		}
+	}
+	if res.Truncated {
+		t.Errorf("truncated=%v (should not be: each file within its own budget)", res.Truncated)
+	}
+}
+
+// TestPerFileBudgetTruncatedOneStillScansOthers: with per_file_budget, a file
+// that exceeds the per-file budget is truncated, but the other files are still
+// scanned (no cascade abort as with the shared budget).
+func TestPerFileBudgetTruncatedOneStillScansOthers(t *testing.T) {
+	cfg, dir := newCfg(t)
+	lim := cfg.Limits
+	lim.MaxBytes = 2 << 10
+	cfg2 := &security.Config{Dirs: cfg.Dirs, Limits: lim}
+
+	var sbA strings.Builder
+	for i := 0; i < 60; i++ { // 60 * 1001 B ≈ 60 KiB > 2 KiB budget
+		sbA.WriteString(strings.Repeat("z", 1000) + "\n")
+	}
+	a := filepath.Join(dir, "a.log")
+	b := filepath.Join(dir, "b.log")
+	if err := os.WriteFile(a, []byte(sbA.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var sbB strings.Builder
+	for i := 0; i < 25; i++ {
+		sbB.WriteString(strings.Repeat("y", 50) + "\n")
+	}
+	if err := os.WriteFile(b, []byte(sbB.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := mustRun(t, Options{Policy: cfg2, Limits: lim, Files: []string{a, b},
+		Keywords: []string{"yyyy"}, PerFileBudget: true,
+		HasBounds: true,
+		Start:     time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+		End:       time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)})
+	if !res.Truncated {
+		t.Error("expected truncated=true (a.log exceeds its per-file budget)")
+	}
+	if len(res.PerFile) != 2 {
+		t.Fatalf("per_file = %d, want 2 (b.log must still be scanned)", len(res.PerFile))
+	}
+	seenB := false
+	for _, ps := range res.PerFile {
+		if strings.HasSuffix(ps.File, "a.log") && ps.Complete {
+			t.Errorf("a.log should be incomplete (over budget)")
+		}
+		if strings.HasSuffix(ps.File, "b.log") {
+			seenB = true
+			if !ps.Complete {
+				t.Errorf("b.log should be complete under per-file budget, read=%d/%d", ps.BytesRead, ps.BytesTotal)
+			}
+		}
+	}
+	if !seenB {
+		t.Error("b.log was never scanned (per-file budget must not cascade-abort)")
+	}
+}
+
+// TestSharedBudgetFirstFileStarves asserts the old behavior is preserved
+// without per_file_budget: scanning a big first file exhausts the shared
+// budget and the second file never gets scanned.
+func TestSharedBudgetFirstFileStarves(t *testing.T) {
+	cfg, dir := newCfg(t)
+	lim := cfg.Limits
+	lim.MaxBytes = 2 << 10
+	cfg2 := &security.Config{Dirs: cfg.Dirs, Limits: lim}
+
+	var sbA strings.Builder
+	for i := 0; i < 100; i++ {
+		sbA.WriteString(strings.Repeat("z", 1000) + "\n")
+	}
+	a := filepath.Join(dir, "a.log")
+	b := filepath.Join(dir, "b.log")
+	if err := os.WriteFile(a, []byte(sbA.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var sbB strings.Builder
+	for i := 0; i < 25; i++ {
+		sbB.WriteString(strings.Repeat("y", 50) + "\n")
+	}
+	if err := os.WriteFile(b, []byte(sbB.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := mustRun(t, Options{Policy: cfg2, Limits: lim, Files: []string{a, b},
+		Keywords: []string{"yyyy"},
+		HasBounds: true,
+		Start:     time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+		End:       time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)})
+	if !res.Truncated {
+		t.Error("expected truncated=true with a shared tiny budget")
+	}
+	for _, ps := range res.PerFile {
+		if strings.HasSuffix(ps.File, "a.log") && ps.Complete {
+			t.Errorf("a.log should be incomplete (budget spent partway), read=%d/%d", ps.BytesRead, ps.BytesTotal)
+		}
+		if strings.HasSuffix(ps.File, "b.log") {
+			t.Errorf("b.log should not be scanned at all under a shared exhausted budget, got read=%d", ps.BytesRead)
+		}
+	}
+}
+
 // TestTailWithKeywords verifies that get_log_slice-style tail (no bounds, no
 // context) with a keyword returns the most recent matching lines, not a
 // whole-file scan (P0: reverse-ish search for the latest occurrence).

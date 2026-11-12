@@ -185,6 +185,7 @@ func buildQueryOptions(cfg *security.Config, files []string, args map[string]any
 	opts.Exclude, _ = argStringList(args, "exclude_keywords")
 	opts.IgnoreCase, _ = argBool(args, "ignore_case")
 	opts.UseRegex, _ = argBool(args, "use_regex")
+	opts.PerFileBudget, _ = argBool(args, "per_file_budget")
 
 	if n, ok := argInt(args, "context_before"); ok {
 		opts.ContextBefore = n
@@ -223,8 +224,12 @@ reachable within the byte budget.
 "keywords" (array or single string) must ALL appear in a line; every
 exclude_keywords match removes the line. context_before/after add grep-style
 context lines. Output entries are ordered chronologically and limited by
-LOGLENS_MAX_LINES. For a time bounded query, lines with no parseable timestamp
-are skipped and counted in "unparsed_lines".`
+LOGLENS_MAX_LINES. The "per_file" array reports each scanned file's coverage
+(bytes read/total, seek offset, first/last timestamp, completion) so a
+truncated result shows where scanning stopped; when a plain file is seeked
+(seek_offset > 0), entry "line" is the line's offset from that seek point, not
+an absolute file line. For a time bounded query, lines with no parseable
+timestamp are skipped and counted in "unparsed_lines".`
 
 func handleGetLogSlice(cfg *security.Config, now func() time.Time) ToolHandler {
 	return func(ctx context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
@@ -270,11 +275,16 @@ files. "files" is a list of absolute paths (fetch candidates with
 list_log_files); each path is whitelist-checked. keywords must ALL appear in a
 line (AND); regex mode via use_regex:true. Optional start_time/end_time window;
 exclude_keywords removes matching lines; ignore_case and context_before/after
-behave like get_log_slice. Timestamps use the same semantics as get_log_slice
-(no-zone = server local time). Results are ordered chronologically when a time
-window is given. Without time bounds the (possibly multiple) files are scanned
-whole; give a start_time so the query seeks toward the window and stays within
-the byte budget on large files. Bounded by LOGLENS_MAX_LINES,
+behave like get_log_slice. Set "per_file_budget": true to give each file its
+own LOGLENS_MAX_BYTES budget instead of sharing one across files (so one
+oversized file does not starve the others). Timestamps use the same semantics
+as get_log_slice (no-zone = server local time). Results are ordered
+chronologically when a time window is given. Without time bounds the (possibly
+multiple) files are scanned whole; give a start_time so the query seeks toward
+the window and stays within the byte budget on large files. The response's
+"per_file" array reports each scanned file's coverage (bytes read/total,
+scan start offset, first/last timestamp, completion) so a truncated result
+shows where scanning stopped. Bounded by LOGLENS_MAX_LINES,
 LOGLENS_MAX_BYTES and LOGLENS_TIMEOUT_MS; when a bound trips, "truncated" is
 set with the reason.`
 

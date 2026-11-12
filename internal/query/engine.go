@@ -28,15 +28,29 @@ type Entry struct {
 	Text string  `json:"text"`
 }
 
+// FileScan summarizes how one file was scanned, so the MCP caller can see the
+// coverage of a (possibly truncated) query and interpret entry line numbers.
+type FileScan struct {
+	File        string  `json:"file"`
+	BytesRead   int64   `json:"bytes_read"`              // decoded bytes consumed from this file
+	BytesTotal  int64   `json:"bytes_total,omitempty"`   // file size; 0 when unknown (gz/cannot stat)
+	SeekOffset  int64   `json:"seek_offset,omitempty"`   // byte offset scanning started at; entry Line is relative to it when > 0
+	Complete    bool    `json:"complete"`                // reached EOF (not cut by budget/limit/timeout)
+	ScannedFrom *string `json:"scanned_from,omitempty"`  // timestamp of the first scanned line
+	ScannedTo   *string `json:"scanned_to,omitempty"`    // timestamp of the last scanned line
+}
+
 // Result is what a slice/search returns to the MCP caller.
 type Result struct {
-	Files         []string `json:"files"`         // files that were actually scanned
-	Entries       []Entry  `json:"entries"`       // hit + context lines, in read order
-	TotalMatched  int      `json:"total_matched"` // lines matching the filters (excludes context)
-	ScannedBytes  int64    `json:"scanned_bytes"`
-	UnparsedLines int64    `json:"unparsed_lines,omitempty"` // lines without a parseable timestamp in a time-bounded query
-	Truncated     bool     `json:"truncated"`                // true if a limit cut results short
-	Reason        string   `json:"reason,omitempty"`
+	Files         []string   `json:"files"`         // files that were actually scanned
+	Entries       []Entry    `json:"entries"`       // hit + context lines, in read order
+	TotalMatched  int        `json:"total_matched"` // lines matching the filters (excludes context)
+	ScannedBytes  int64      `json:"scanned_bytes"`
+	UnparsedLines int64      `json:"unparsed_lines,omitempty"` // lines without a parseable timestamp in a time-bounded query
+	Truncated     bool       `json:"truncated"`                // true if a limit cut results short
+	Reason        string     `json:"reason,omitempty"`
+	PerFile       []FileScan `json:"per_file"` // per-file scan coverage (omitempty when empty)
+
 }
 
 // Options configures a single query run.
@@ -59,6 +73,9 @@ type Options struct {
 	// search_logs, whose no-bounds + keywords contract is a whole-|file| search;
 	// get_log_slice without bounds keeps the cheap tail semantics instead.
 	FullScan bool
+	// PerFileBudget gives each file its own MaxBytes instead of sharing one
+	// global budget across files, so one oversized file cannot starve the rest.
+	PerFileBudget bool
 }
 
 // tailMode reports whether the query reads only the tail window of the newest
@@ -102,7 +119,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	defer cancel()
 	now := time.Now()
 
-	res := &Result{Entries: []Entry{}}
+	res := &Result{Entries: []Entry{}, PerFile: []FileScan{}}
 
 	// No time bounds, no context: cheap tail of the newest file. Keywords /
 	// excludes (if any) are applied inside the tail window, returning the most
@@ -112,7 +129,11 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	}
 
 	for _, f := range opts.Files {
-		if res.Truncated || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			break
+		}
+		if !opts.PerFileBudget && res.Truncated {
+			// Shared budget already exhausted: further files have nothing left.
 			break
 		}
 		if err := runFile(ctx, f, &opts, m, res, now); err != nil {
@@ -212,6 +233,7 @@ func runFile(ctx context.Context, f string, opts *Options, m *matcher, res *Resu
 	if err != nil {
 		return err
 	}
+	fs := FileScan{File: resolved}
 
 	// Plain file with a start bound: seek toward the window instead of scanning
 	// the whole head. gz files cannot seek and fall through to the full scan.
@@ -223,12 +245,14 @@ func runFile(ctx context.Context, f string, opts *Options, m *matcher, res *Resu
 		defer fh.Close()
 		res.Files = append(res.Files, resolved)
 		if st, serr := fh.Stat(); serr == nil {
+			fs.BytesTotal = st.Size()
 			off, probe := locateStartOffset(fh, st.Size(), opts.Start, now)
 			res.ScannedBytes += probe
+			fs.SeekOffset = off
 			if _, serr := fh.Seek(off, io.SeekStart); serr != nil {
 				return serr
 			}
-			return scanReader(ctx, fh, resolved, opts, m, res, now)
+			return scanReader(ctx, fh, resolved, opts, m, res, &fs, now)
 		}
 	}
 
@@ -238,15 +262,21 @@ func runFile(ctx context.Context, f string, opts *Options, m *matcher, res *Resu
 	}
 	defer rc.Close()
 	res.Files = append(res.Files, resolved)
-	return scanReader(ctx, rc, resolved, opts, m, res, now)
+	return scanReader(ctx, rc, resolved, opts, m, res, &fs, now)
 }
 
 // scanReader streams rc through the filter pipeline sharing the runFile logic.
-func scanReader(ctx context.Context, rc io.Reader, resolved string, opts *Options, m *matcher, res *Result, now time.Time) error {
+// fs is filled with the per-file coverage (bytes read, timestamps seen,
+// completion flag) so a truncated result carries enough context to retry.
+func scanReader(ctx context.Context, rc io.Reader, resolved string, opts *Options, m *matcher, res *Result, fs *FileScan, now time.Time) error {
 	budget := opts.Limits.MaxBytes - res.ScannedBytes
+	if opts.PerFileBudget {
+		budget = opts.Limits.MaxBytes
+	}
 	if budget <= 0 {
 		res.Truncated = true
 		res.Reason = "byte budget (LOGLENS_MAX_BYTES) exceeded"
+		res.PerFile = append(res.PerFile, *fs)
 		return nil
 	}
 
@@ -257,10 +287,20 @@ func scanReader(ctx context.Context, rc io.Reader, resolved string, opts *Option
 	_, nb, scanErr := logreader.Iterate(ctx, rc, budget, func(l logreader.Line) error {
 		lineStr := string(l.Raw)
 
+		// Parse the line timestamp once; an absent timestamp means "unparsed"
+		// for time-bounded queries and "no surfaced time" otherwise.
+		tt, hasTime := parser.ExtractLineTime(l.Raw, now)
+		if hasTime {
+			s := tt.UTC().Format(time.RFC3339Nano)
+			if fs.ScannedFrom == nil {
+				fs.ScannedFrom = &s
+			}
+			fs.ScannedTo = &s
+		}
+
 		var entryTime *string
 		if opts.HasBounds {
-			tt, ok := parser.ExtractLineTime(l.Raw, now)
-			if !ok {
+			if !hasTime {
 				res.UnparsedLines++
 				return nil // cannot verify a timestamp for a time-sliced query: skip
 			}
@@ -311,25 +351,26 @@ func scanReader(ctx context.Context, rc io.Reader, resolved string, opts *Option
 		return nil
 	})
 	res.ScannedBytes += nb
+	fs.BytesRead += nb
 
 	switch {
 	case scanErr == nil || errors.Is(scanErr, errWindowPassed):
-		return nil
+		fs.Complete = true
 	case errors.Is(scanErr, errResultFull):
 		res.Truncated = true
 		res.Reason = "line limit reached"
-		return nil
 	case errors.Is(scanErr, logreader.ErrBudgetExceeded):
 		res.Truncated = true
 		res.Reason = "byte budget (LOGLENS_MAX_BYTES) exceeded"
-		return nil
 	case errors.Is(scanErr, context.DeadlineExceeded), errors.Is(scanErr, context.Canceled):
 		res.Truncated = true
 		res.Reason = "query timeout reached"
-		return nil
 	default:
+		res.PerFile = append(res.PerFile, *fs)
 		return scanErr
 	}
+	res.PerFile = append(res.PerFile, *fs)
+	return nil
 }
 
 // pushContext appends e to a bounded context-before buffer, dropping the
@@ -365,7 +406,10 @@ func sortEntriesByTime(entries []Entry) {
 // runTail returns the last LimitLines lines (that match m, when m has filters)
 // of the newest file. Plain files are seeked to within MaxBytes of the end
 // (efficient on GB files); gz files are streamed through a rolling window
-// (cannot seek).
+// (cannot seek). Entries' Line is relative to the file head only when the
+// whole file was read (SeekOffset 0); otherwise it is the line's offset from
+// SeekOffset, and the per-file scan carries SeekOffset so the caller can
+// reconstruct the absolute position.
 func runTail(ctx context.Context, opts Options, m *matcher, res *Result, now time.Time) (*Result, error) {
 	newest := opts.Files[len(opts.Files)-1]
 	resolved, err := opts.Policy.Resolve(newest)
@@ -373,6 +417,7 @@ func runTail(ctx context.Context, opts Options, m *matcher, res *Result, now tim
 		return nil, err
 	}
 	res.Files = append(res.Files, resolved)
+	fs := FileScan{File: resolved}
 
 	ring := entryRing{cap: opts.LimitLines}
 
@@ -382,6 +427,16 @@ func runTail(ctx context.Context, opts Options, m *matcher, res *Result, now tim
 			return
 		}
 		ring.push(Entry{File: resolved, Line: l.No, Text: lineStr})
+	}
+
+	record := func(l logreader.Line) {
+		if t, ok := parser.ExtractLineTime(l.Raw, now); ok {
+			s := t.UTC().Format(time.RFC3339Nano)
+			if fs.ScannedFrom == nil {
+				fs.ScannedFrom = &s
+			}
+			fs.ScannedTo = &s
+		}
 	}
 
 	var rc interface {
@@ -395,10 +450,13 @@ func runTail(ctx context.Context, opts Options, m *matcher, res *Result, now tim
 		}
 		defer mcClose(rc)
 		_, nb, iterErr := logreader.Iterate(ctx, rc, opts.Limits.MaxBytes, func(l logreader.Line) error {
+			record(l)
 			push(l)
 			return nil
 		})
 		res.ScannedBytes += nb
+		fs.BytesRead = nb
+		fs.Complete = iterErr == nil
 		res.Truncated = res.Truncated || iterErr != nil
 		if iterErr != nil {
 			res.Reason = tailReason(iterErr)
@@ -409,20 +467,24 @@ func runTail(ctx context.Context, opts Options, m *matcher, res *Result, now tim
 			return nil, opErr
 		}
 		defer f.Close()
-		fi, statErr := f.Stat()
-		if statErr == nil {
+		if fi, statErr := f.Stat(); statErr == nil {
+			fs.BytesTotal = fi.Size()
 			// Seek within MaxBytes of the end, honoring the byte budget.
 			off := fi.Size() - opts.Limits.MaxBytes
 			if off < 0 {
 				off = 0
 			}
+			fs.SeekOffset = off
 			_, _ = f.Seek(off, os.SEEK_SET)
 		}
 		_, nb, iterErr := logreader.Iterate(ctx, f, opts.Limits.MaxBytes, func(l logreader.Line) error {
+			record(l)
 			push(l)
 			return nil
 		})
 		res.ScannedBytes += nb
+		fs.BytesRead = nb
+		fs.Complete = iterErr == nil
 		res.Truncated = res.Truncated || iterErr != nil
 		if iterErr != nil {
 			res.Reason = tailReason(iterErr)
@@ -431,6 +493,7 @@ func runTail(ctx context.Context, opts Options, m *matcher, res *Result, now tim
 
 	res.Entries = ring.head()
 	res.TotalMatched = len(res.Entries)
+	res.PerFile = append(res.PerFile, fs)
 	return res, nil
 }
 

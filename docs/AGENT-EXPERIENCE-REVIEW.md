@@ -40,7 +40,25 @@
 - [internal/mcp/tools.go](../internal/mcp/tools.go)：`getLogSliceDesc`/`searchLogsDesc` 更新，`search_logs` 置 `FullScan`
 - 测试：[engine_test.go](../internal/query/engine_test.go) `TestSeekLocatesStart`/`TestSeekHandlesEarlyStart`/`TestTailWithKeywords`
 
-> 未实现（后续迭代）：P1 · 结果带扫描覆盖上下文（`scanned_interval`）；P1 · tail 行号修正（seek 后 `line` 为相对序号）；P1 · 多文件预算按文件分配。
+> 未实现（后续迭代）：P1 · ~~结果带扫描覆盖上下文~~ ✅、P1 · ~~tail 行号修正~~ ✅、P1 · ~~多文件预算按文件分配~~ ✅。
+
+## P1 优化落地记录（2026-11-12）
+
+三项 P1 已实现：
+
+### P1-1 · 结果带扫描覆盖上下文（已实现）
+
+`Result` 新增 `per_file` 数组（`FileScan`）：每个被扫描文件记录 `bytes_read` / `bytes_total`（可计算覆盖比例）、`seek_offset`（扫描起点字节偏移）、`scanned_from` / `scanned_to`（首末行时间戳）、`complete`（是否读到 EOF）。truncated 结果据此告知「扫到哪、还差多少」，Agent 可判断是换窗口还是加预算。扫描期间对每行只解析一次时间戳（顺带修复了 P2 的重复解析开销）。
+
+### P1-2 · tail 行号语义（已实现）
+
+seek / tail 查询中 `entry.line` 是相对扫描起点的行号，`FileScan.seek_offset` 给出该起点，Agent 可据此还原绝对位置；`seek_offset = 0`（整体读）时 `line` 即真实行号。MCP 工具描述明确了该语义。绝对行号需要全扫 seek 起点前内容，与 seek 的初衷冲突，故采用「显式标注」方案（符合验收条款 b）。
+
+### P1-3 · 多文件预算按文件分配（已实现）
+
+新增 `per_file_budget` 选项（`search_logs` / `get_log_slice` 均可传）：每个文件独立享有一份 `LOGLENS_MAX_BYTES`，不再共享一个全局预算。同时修正 `Run` 循环：per-file 模式下单个文件截断不会 cascade 终止后续文件（`TestPerFileBudgetTruncatedOneStillScansOthers` 验证）。默认关闭，保持既有共享预算行为不变。
+
+> 剩余：P2 · `ExtractLineTime` 短路已随 P1-1 顺带完成；P2 · `list_log_files` 独立上限、P2 · 截断原因粒度仍待办。
 
 ## 触发场景（复现步骤)
 
@@ -135,9 +153,9 @@
 |---|---|---|---|
 | **P0** | 时间窗查询 seek 定位 | ✅ 已实现（见「P0 优化落地记录」）:二分定位 `Start` 偏移 + 扫过 `End` 提前终止 | 问题 1,本次 8 处调用全部命中盲区的直接解药 |
 | **P0** | 尾部反向搜索 | ✅ 已实现:`tailMode` 扩展为「tail + 关键词」返回最近的 N 条命中;`search_logs` 走 `FullScan` 保持整文件搜索契约 | 问题 2 |
-| **P1** | 结果带扫描覆盖上下文 | `Result` 增加 `scanned_interval`（扫到的时间范围）或 `bytes_scanned/bytes_total`;truncated 时附未覆盖区间的估计时间范围 | 问题 3 |
-| **P1** | 多文件预算按文件分配 | 新增 `per_file_budget` 语义（每文件独立 MaxBytes）,或预算均分并逐文件报告各自状态 | 问题 4 |
-| **P1** | tail 行号修正 | 保持 `line` 为文件真实行号：tail 时先求 seek 起点的真实行号再累计,或在 `Result` 标注 `line` 语义（`relative_to`）;两种模式语义必须一致 | 问题 6,二次定位锚点漂移 |
+| **P1** | 结果带扫描覆盖上下文 | ✅ 已实现:`Result.per_file[]` 含 `bytes_read/total`、`seek_offset`、`scanned_from/to`、`complete` | 问题 3 |
+| **P1** | 多文件预算按文件分配 | ✅ 已实现:`per_file_budget` 选项,每文件独立 MaxBytes;per-file 截断不再 cascade 终止其余文件 | 问题 4 |
+| **P1** | tail 行号修正 | ✅ 已实现:`FileScan.seek_offset` 显式标注 line 的相对偏移,`seek_offset=0` 时 line 即真实行号 | 问题 6,二次定位锚点漂移 |
 | **P2** | `ExtractLineTime` 短路 | 首字节命中 `\d` `/` `[` `{` 等判型后再进 layout 循环,降低高频轮询日志解析成本 | 性能 |
 | **P2** | `list_log_files` 独立上限 | `MaxFiles` 与 `MaxLines` 解耦或以环境变量单独配置,截断时显式告知 | 列表可靠性 |
 | **P2** | 截断原因细粒度化 | 区分「字节预算先触顶」与「行数先触顶」,并在工具描述中引导对应换参 | 诊断 |
