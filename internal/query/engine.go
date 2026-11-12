@@ -4,9 +4,11 @@
 package query
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"sort"
@@ -53,15 +55,30 @@ type Options struct {
 	ContextAfter  int
 	LimitLines    int // 0 => Limits.MaxLines
 	SortByTime    bool
+	// FullScan forces the full-file path even without time bounds. Used by
+	// search_logs, whose no-bounds + keywords contract is a whole-|file| search;
+	// get_log_slice without bounds keeps the cheap tail semantics instead.
+	FullScan bool
 }
 
+// tailMode reports whether the query reads only the tail window of the newest
+// file: no time bounds, no context lines. Keywords/exclude filters are allowed
+// and are applied inside the tail window (returns the most recent matching
+// lines). FullScan suppresses tail so search stays whole-file.
 func (o *Options) tailMode() bool {
-	return !o.HasBounds && len(o.Keywords) == 0 && len(o.Exclude) == 0 &&
-		o.ContextBefore == 0 && o.ContextAfter == 0 && len(o.Files) > 0
+	if o.FullScan {
+		return false
+	}
+	return !o.HasBounds && o.ContextBefore == 0 && o.ContextAfter == 0 && len(o.Files) > 0
 }
 
 // errResultFull aborts iteration once the returned-line cap is hit.
 var errResultFull = errors.New("result limit reached")
+
+// errWindowPassed stops a seeked time-slice once all remaining lines are known
+// to be after the window end (log timestamps are monotonic in practice). It is
+// an optimization for seeked queries, not a data-loss flag.
+var errWindowPassed = errors.New("window passed")
 
 // Run executes a query. Resource exhaustion (timeout or byte budget) returns a
 // partial Result with Truncated set, not an error, so the MCP caller can see
@@ -87,9 +104,11 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 
 	res := &Result{Entries: []Entry{}}
 
-	// No bounds, no filters: return the most recent lines (cheap tail).
+	// No time bounds, no context: cheap tail of the newest file. Keywords /
+	// excludes (if any) are applied inside the tail window, returning the most
+	// recent matching lines.
 	if opts.tailMode() {
-		return runTail(ctx, opts, res, now)
+		return runTail(ctx, opts, m, res, now)
 	}
 
 	for _, f := range opts.Files {
@@ -107,6 +126,85 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	return res, nil
 }
 
+// locateBackoffBytes is how far before the located start we begin scanning, so
+// lines without a parseable timestamp (or a small probing error) right at the
+// boundary are not missed; the time-window filter removes anything before Start.
+const locateBackoffBytes = 32 << 10 // 32 KiB
+
+// locateStartOffset finds, for a plain (non-gz) file, a byte offset from which
+// sequential scanning will reach lines with timestamp >= start without reading
+// the whole file head. A binary search probes mid-file lines; the returned
+// offset backs off locateBackoffBytes before the located boundary. The number
+// of bytes consumed by probing is returned for budget accounting. Returns 0
+// (scan from head) when the file has no probeable timestamp.
+func locateStartOffset(f *os.File, size int64, start time.Time, now time.Time) (off, probeBytes int64) {
+	if size <= 0 {
+		return 0, 0
+	}
+	lo, hi := int64(0), size-1
+	for lo <= hi {
+		mid := lo + (hi-lo)/2
+		t, ok, n := probeTimeAt(f, mid, now)
+		probeBytes += n
+		if !ok {
+			// Offset is mid-line or the file has no parseable timestamps:
+			// fall back to scanning from the head to stay correct.
+			return 0, probeBytes
+		}
+		if t.Before(start) {
+			lo = mid + 1
+		} else {
+			hi = mid - 1
+		}
+	}
+	best := lo
+	if best > locateBackoffBytes {
+		best -= locateBackoffBytes
+	} else {
+		best = 0
+	}
+	return best, probeBytes
+}
+
+// probeTimeAt seeks to off and returns the timestamp of the first whole line
+// at or after that offset (the first read may start mid-line and is skipped).
+// n is the number of bytes read during probing.
+func probeTimeAt(f *os.File, off int64, now time.Time) (time.Time, bool, int64) {
+	if _, err := f.Seek(off, io.SeekStart); err != nil {
+		return time.Time{}, false, 0
+	}
+	br := bufio.NewReaderSize(f, 64<<10)
+	// Discard the possibly mid-line first read, then inspect whole lines.
+	var n int64
+	for i := 0; i < 4; i++ {
+		line, err := br.ReadSlice('\n')
+		n += int64(len(line))
+		if i == 0 {
+			// This chunk may start inside a line (bogus leading timestamp):
+			// skip it unless we are at offset 0 and got a complete first line.
+			if err == nil && off == 0 {
+				if t, ok := parser.ExtractLineTime(line, now); ok {
+					return t, true, n
+				}
+			}
+			if err == nil || err == bufio.ErrBufferFull {
+				if off == 0 {
+					return time.Time{}, false, n // offset 0: examine as-is below
+				}
+				continue
+			}
+			return time.Time{}, false, n
+		}
+		if t, ok := parser.ExtractLineTime(line, now); ok {
+			return t, true, n
+		}
+		if err != nil && err != bufio.ErrBufferFull {
+			return time.Time{}, false, n
+		}
+	}
+	return time.Time{}, false, n
+}
+
 // runFile evaluates one file: resolve against the policy (defense in depth),
 // open lazily (gz-aware), then stream lines through the filter pipeline.
 func runFile(ctx context.Context, f string, opts *Options, m *matcher, res *Result, now time.Time) error {
@@ -114,14 +212,43 @@ func runFile(ctx context.Context, f string, opts *Options, m *matcher, res *Resu
 	if err != nil {
 		return err
 	}
+
+	// Plain file with a start bound: seek toward the window instead of scanning
+	// the whole head. gz files cannot seek and fall through to the full scan.
+	if opts.HasBounds && !opts.Start.IsZero() && !logreader.IsGzip(resolved) {
+		fh, oerr := os.Open(resolved)
+		if oerr != nil {
+			return oerr
+		}
+		defer fh.Close()
+		res.Files = append(res.Files, resolved)
+		if st, serr := fh.Stat(); serr == nil {
+			off, probe := locateStartOffset(fh, st.Size(), opts.Start, now)
+			res.ScannedBytes += probe
+			if _, serr := fh.Seek(off, io.SeekStart); serr != nil {
+				return serr
+			}
+			return scanReader(ctx, fh, resolved, opts, m, res, now)
+		}
+	}
+
 	rc, err := logreader.OpenRead(resolved)
 	if err != nil {
 		return err
 	}
 	defer rc.Close()
 	res.Files = append(res.Files, resolved)
+	return scanReader(ctx, rc, resolved, opts, m, res, now)
+}
 
+// scanReader streams rc through the filter pipeline sharing the runFile logic.
+func scanReader(ctx context.Context, rc io.Reader, resolved string, opts *Options, m *matcher, res *Result, now time.Time) error {
 	budget := opts.Limits.MaxBytes - res.ScannedBytes
+	if budget <= 0 {
+		res.Truncated = true
+		res.Reason = "byte budget (LOGLENS_MAX_BYTES) exceeded"
+		return nil
+	}
 
 	var (
 		before         []Entry
@@ -138,6 +265,12 @@ func runFile(ctx context.Context, f string, opts *Options, m *matcher, res *Resu
 				return nil // cannot verify a timestamp for a time-sliced query: skip
 			}
 			if tt.Before(opts.Start) || tt.After(opts.End) {
+				// Past the window end (timestamps are monotonic in practice):
+				// stop early when no context_after is still owed, so a seeked
+				// query does not burn the byte budget on lines after the window.
+				if tt.After(opts.End) && afterRemaining == 0 {
+					return errWindowPassed
+				}
 				return nil
 			}
 			s := tt.UTC().Format(time.RFC3339Nano)
@@ -180,7 +313,7 @@ func runFile(ctx context.Context, f string, opts *Options, m *matcher, res *Resu
 	res.ScannedBytes += nb
 
 	switch {
-	case scanErr == nil:
+	case scanErr == nil || errors.Is(scanErr, errWindowPassed):
 		return nil
 	case errors.Is(scanErr, errResultFull):
 		res.Truncated = true
@@ -229,10 +362,11 @@ func sortEntriesByTime(entries []Entry) {
 	})
 }
 
-// runTail returns the last LimitLines lines of the newest file. Plain files
-// are seeked to within MaxBytes of the end (efficient on GB files); gz files
-// are streamed through a rolling window (cannot seek).
-func runTail(ctx context.Context, opts Options, res *Result, now time.Time) (*Result, error) {
+// runTail returns the last LimitLines lines (that match m, when m has filters)
+// of the newest file. Plain files are seeked to within MaxBytes of the end
+// (efficient on GB files); gz files are streamed through a rolling window
+// (cannot seek).
+func runTail(ctx context.Context, opts Options, m *matcher, res *Result, now time.Time) (*Result, error) {
 	newest := opts.Files[len(opts.Files)-1]
 	resolved, err := opts.Policy.Resolve(newest)
 	if err != nil {
@@ -241,6 +375,14 @@ func runTail(ctx context.Context, opts Options, res *Result, now time.Time) (*Re
 	res.Files = append(res.Files, resolved)
 
 	ring := entryRing{cap: opts.LimitLines}
+
+	push := func(l logreader.Line) {
+		lineStr := string(l.Raw)
+		if m != nil && !m.matches(lineStr) {
+			return
+		}
+		ring.push(Entry{File: resolved, Line: l.No, Text: lineStr})
+	}
 
 	var rc interface {
 		Read([]byte) (int, error)
@@ -253,7 +395,7 @@ func runTail(ctx context.Context, opts Options, res *Result, now time.Time) (*Re
 		}
 		defer mcClose(rc)
 		_, nb, iterErr := logreader.Iterate(ctx, rc, opts.Limits.MaxBytes, func(l logreader.Line) error {
-			ring.push(Entry{File: resolved, Line: l.No, Text: string(l.Raw)})
+			push(l)
 			return nil
 		})
 		res.ScannedBytes += nb
@@ -277,7 +419,7 @@ func runTail(ctx context.Context, opts Options, res *Result, now time.Time) (*Re
 			_, _ = f.Seek(off, os.SEEK_SET)
 		}
 		_, nb, iterErr := logreader.Iterate(ctx, f, opts.Limits.MaxBytes, func(l logreader.Line) error {
-			ring.push(Entry{File: resolved, Line: l.No, Text: string(l.Raw)})
+			push(l)
 			return nil
 		})
 		res.ScannedBytes += nb

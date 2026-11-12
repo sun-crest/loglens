@@ -17,6 +17,31 @@
 
 另有 4 项 P2 级次要问题（多文件预算不均、逐行时间解析开销、列表上限耦合、截断原因粒度）。
 
+## P0 优化落地记录（2026-11-12）
+
+两项 P0 已实现并通过真实日志回归验证：
+
+### P0-1 · 时间窗 seek 定位（已实现）
+
+- `locateStartOffset`：对普通（非 gz）文件二分探测行首时间戳，定位 `Start` 对应字节偏移，回退 32 KiB 后从该处起扫；
+- 预算从定位点重新起算，读取不再被文件头无关行占用；
+- 扫过 `End`（且无 context_after 待补）即提前终止（`errWindowPassed`），避免预算浪费在窗口之后；
+- **真实日志回归**：42 MiB `app_2026-11-12.log`，查 `09:49~11:05` 窗口 + `tasks` 关键词 → `truncated=false`，扫描 8.1 MB，一次返回 25 条（原来 0 命中 + 截断）。
+
+### P0-2 · tail + 关键词（已实现）
+
+- `tailMode` 允许 keywords/exclude（无 bounds、无 context）；`search_logs` 通过 `Options.FullScan` 保持「无时间窗 = 整文件扫描」的旧契约，`get_log_slice` 无时间窗 = 尾部窗口内过滤；
+- `runTail` 在窗口内应用 matcher，返回**最近的** N 条匹配；
+- 边界提示：tail 窗口是文件末尾 `MaxBytes` 内的数据，若目标事件在更早位置，应改用时间窗 + seek（P0-1）而非 tail。
+
+### 相关代码
+
+- [internal/query/engine.go](../internal/query/engine.go)：`locateStartOffset`/`probeTimeAt`/`errWindowPassed`/`tailMode`/`FullScan`/`scanReader`
+- [internal/mcp/tools.go](../internal/mcp/tools.go)：`getLogSliceDesc`/`searchLogsDesc` 更新，`search_logs` 置 `FullScan`
+- 测试：[engine_test.go](../internal/query/engine_test.go) `TestSeekLocatesStart`/`TestSeekHandlesEarlyStart`/`TestTailWithKeywords`
+
+> 未实现（后续迭代）：P1 · 结果带扫描覆盖上下文（`scanned_interval`）；P1 · tail 行号修正（seek 后 `line` 为相对序号）；P1 · 多文件预算按文件分配。
+
 ## 触发场景（复现步骤)
 
 环境：`loglens serve` 部署在远程主机，`LOGLENS_MAX_BYTES=10485760`（10 MiB）。
@@ -108,8 +133,8 @@
 
 | 优先级 | 优化项 | 做法 | 解决的体验问题 |
 |---|---|---|---|
-| **P0** | 时间窗查询 seek 定位 | `runFile` 在 `HasBounds` 时,对**普通（非 gz）文件**二分/抽样定位 `Start` 的字节偏移,从该处起扫,预留前置余量给 `ContextBefore` 与无时间戳跳过行;gz 保持现状（不可 seek） | 问题 1,本次 8 处调用全部命中盲区的直接解药 |
-| **P0** | 尾部反向搜索 | 新增反向扫描路径:普通文件 `Seek(max(size−MaxBytes,0))` 后逆序扫 + matcher;或将 `tailMode` 扩展为「tail + 关键词」,返回最近的 N 条命中 | 问题 2 |
+| **P0** | 时间窗查询 seek 定位 | ✅ 已实现（见「P0 优化落地记录」）:二分定位 `Start` 偏移 + 扫过 `End` 提前终止 | 问题 1,本次 8 处调用全部命中盲区的直接解药 |
+| **P0** | 尾部反向搜索 | ✅ 已实现:`tailMode` 扩展为「tail + 关键词」返回最近的 N 条命中;`search_logs` 走 `FullScan` 保持整文件搜索契约 | 问题 2 |
 | **P1** | 结果带扫描覆盖上下文 | `Result` 增加 `scanned_interval`（扫到的时间范围）或 `bytes_scanned/bytes_total`;truncated 时附未覆盖区间的估计时间范围 | 问题 3 |
 | **P1** | 多文件预算按文件分配 | 新增 `per_file_budget` 语义（每文件独立 MaxBytes）,或预算均分并逐文件报告各自状态 | 问题 4 |
 | **P1** | tail 行号修正 | 保持 `line` 为文件真实行号：tail 时先求 seek 起点的真实行号再累计,或在 `Result` 标注 `line` 语义（`relative_to`）;两种模式语义必须一致 | 问题 6,二次定位锚点漂移 |

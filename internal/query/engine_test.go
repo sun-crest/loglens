@@ -335,3 +335,109 @@ func TestUnparsedLinesCounted(t *testing.T) {
 		t.Errorf("matched = %d, want 2", res.TotalMatched)
 	}
 }
+
+// bigLog writes n lines, each about lineLen bytes with an increasing
+// timestamp, so the file is many times larger than the byte budget.
+func bigLog(t *testing.T, file string, n, lineLen int) {
+	t.Helper()
+	var sb strings.Builder
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&sb, "2026-11-10T12:%02d:%02d.%06dZ ", i/60, i%60, i%1000000)
+		sb.WriteString(strings.Repeat("x", lineLen-40))
+		sb.WriteString(" marker\n")
+	}
+	if err := os.WriteFile(file, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSeekLocatesStart verifies that a time-bounded query on a file much
+// larger than the byte budget can still reach a window in the middle/later
+// part (P0: no more blind spot at the tail of oversized files).
+func TestSeekLocatesStart(t *testing.T) {
+	cfg, dir := newCfg(t)
+	lim := cfg.Limits
+	lim.MaxBytes = 1 << 20 // 1 MiB budget
+	cfg2 := &security.Config{Dirs: cfg.Dirs, Limits: lim}
+
+	file := filepath.Join(dir, "big.log")
+	// ~3000 lines * ~1200 bytes ≈ 3.6 MiB, budget only covers the first ~1 MiB.
+	bigLog(t, file, 3000, 1200)
+
+	// Window at ~minute 30 (line ~1800, ~2.2 MiB in): beyond the 1 MiB budget
+	// from the head, reachable only via seek.
+	start := time.Date(2026, 11, 10, 12, 30, 10, 0, time.UTC)
+	end := time.Date(2026, 11, 10, 12, 30, 20, 0, time.UTC)
+	res := mustRun(t, Options{Policy: cfg2, Limits: lim, Files: []string{file},
+		HasBounds: true, Start: start, End: end})
+
+	if res.Truncated {
+		t.Fatalf("truncated=true (%s): window should be within budget after seek", res.Reason)
+	}
+	if res.TotalMatched == 0 {
+		t.Fatalf("no matches: seek did not reach the window (scanned=%d)", res.ScannedBytes)
+	}
+	for i, e := range res.Entries {
+		if e.Time == nil {
+			t.Fatalf("entry %d missing time", i)
+		}
+	}
+	// Every returned line must be within [start, end].
+	for _, e := range res.Entries {
+		tt, err := time.Parse(time.RFC3339Nano, *e.Time)
+		if err != nil {
+			t.Fatalf("bad entry time %q: %v", *e.Time, err)
+		}
+		if tt.Before(start) || tt.After(end) {
+			t.Errorf("entry outside window: %v", tt)
+		}
+	}
+}
+
+// TestSeekHandlesOutOfRangeStart: a start far before the file must not break
+// the query (seek falls back to the head).
+func TestSeekHandlesEarlyStart(t *testing.T) {
+	cfg, dir := newCfg(t)
+	file := filepath.Join(dir, "early.log")
+	makeLog(t, file, 40)
+	res := mustRun(t, Options{Policy: cfg, Limits: cfg.Limits, Files: []string{file},
+		HasBounds: true,
+		Start:     time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+		End:       time.Date(2026, 11, 10, 12, 0, 39, 0, time.UTC)})
+	if res.TotalMatched != 40 {
+		t.Errorf("matched = %d, want 40 (all lines)", res.TotalMatched)
+	}
+}
+
+// TestTailWithKeywords verifies that get_log_slice-style tail (no bounds, no
+// context) with a keyword returns the most recent matching lines, not a
+// whole-file scan (P0: reverse-ish search for the latest occurrence).
+func TestTailWithKeywords(t *testing.T) {
+	cfg, dir := newCfg(t)
+	file := filepath.Join(dir, "tw.log")
+	var sb strings.Builder
+	for i := 0; i < 30; i++ {
+		line := fmt.Sprintf("2026-11-10T12:00:%02d.000Z INFO msg-%02d", i, i)
+		if i%3 == 0 {
+			line += " WANT"
+		}
+		sb.WriteString(line + "\n")
+	}
+	if err := os.WriteFile(file, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := mustRun(t, Options{Policy: cfg, Limits: cfg.Limits, Files: []string{file},
+		LimitLines: 5, Keywords: []string{"WANT"}})
+	if res.Truncated {
+		t.Fatalf("truncated: %s", res.Reason)
+	}
+	if res.TotalMatched != 5 {
+		t.Errorf("matched = %d, want exactly 5 (limit)", res.TotalMatched)
+	}
+	// Most recent matching lines first (msg-27 is the last WANT at i=27).
+	last := res.Entries[len(res.Entries)-1].Text
+	if !strings.Contains(last, "msg-27") {
+		t.Errorf("last entry should be the newest match msg-27, got %q", last)
+	}
+}

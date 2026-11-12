@@ -215,7 +215,11 @@ TIMESTAMP SEMANTICS: timestamps without an explicit zone are interpreted in the
 server's LOCAL timezone, so copy the format the log files themselves use
 (RFC3339 with "Z" for UTC logs, "YYYY-MM-DD HH:MM:SS" for local-time logs), and
 use the same flavor for start_time and end_time.
-If time bounds are omitted this returns the most recent lines (tail).
+If time bounds are omitted this returns the most recent lines (tail); with
+keywords it returns the most recent lines matching them (great for "last call
+to /api/foo"). With time bounds, the query seeks to the window start instead of
+reading the whole file, so windows in the middle/end of very large logs are
+reachable within the byte budget.
 "keywords" (array or single string) must ALL appear in a line; every
 exclude_keywords match removes the line. context_before/after add grep-style
 context lines. Output entries are ordered chronologically and limited by
@@ -268,8 +272,11 @@ line (AND); regex mode via use_regex:true. Optional start_time/end_time window;
 exclude_keywords removes matching lines; ignore_case and context_before/after
 behave like get_log_slice. Timestamps use the same semantics as get_log_slice
 (no-zone = server local time). Results are ordered chronologically when a time
-window is given. Bounded by LOGLENS_MAX_LINES, LOGLENS_MAX_BYTES and
-LOGLENS_TIMEOUT_MS; when a bound trips, "truncated" is set with the reason.`
+window is given. Without time bounds the (possibly multiple) files are scanned
+whole; give a start_time so the query seeks toward the window and stays within
+the byte budget on large files. Bounded by LOGLENS_MAX_LINES,
+LOGLENS_MAX_BYTES and LOGLENS_TIMEOUT_MS; when a bound trips, "truncated" is
+set with the reason.`
 
 func handleSearchLogs(cfg *security.Config, now func() time.Time) ToolHandler {
 	return func(ctx context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
@@ -285,6 +292,9 @@ func handleSearchLogs(cfg *security.Config, now func() time.Time) ToolHandler {
 		if err != nil {
 			return errResult(err), nil
 		}
+		// search_logs without time bounds scans whole files (old contract);
+		// get_log_slice without bounds is a cheap tail of the newest file.
+		opts.FullScan = true
 		res, err := query.Run(ctx, opts)
 		if err != nil {
 			return errResult(err), nil
