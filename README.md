@@ -99,35 +99,33 @@ ssh -N -L 8787:127.0.0.1:8787 user@your-server
 }
 ```
 
-**方式 3 · 局域网直连（不建隧道，从零六步）**：同一局域网内服务器直连，按顺序照抄。`192.168.1.50` 与 `loglens-lan` 是示例，按实际替换。服务端用启动脚本 [scripts/loglens-serve.sh](scripts/loglens-serve.sh) 一步装成 systemd 常驻。
+**方式 3 · 局域网直连（不建隧道，从零六步）**：同一局域网内服务器直连，按顺序照抄。`192.168.1.50` 与 `loglens-lan` 是示例，按实际替换。
 
-1. **日志主机准备二进制与脚本**（在编译机执行）：
+1. **日志主机准备二进制**（在编译机执行）：
 
 ```bash
 cd loglens && go build ./cmd/loglens
-scp loglens scripts/loglens-serve.sh user@192.168.1.50:~/
-ssh user@192.168.1.50 'sudo mv ~/loglens ~/loglens-serve.sh /usr/local/bin/'
+scp loglens user@192.168.1.50:~/
+ssh user@192.168.1.50 'sudo mv ~/loglens /usr/local/bin/'
 ```
 
-2. **一键安装并启动**（在日志主机执行；自动生成/复用 token、写 systemd 单元、启动常驻并打印 token）：
+2. **生成强 token、前台起 serve**（在日志主机执行；`sudo` 用于读 `/var/log` 下 root 才可读的目录，无此需要可去掉）：
 
 ```bash
-sudo LOGLENS_WHITELIST_DIRS=/var/log,/opt/service/logs \
-  /usr/local/bin/loglens-serve.sh install --addr 192.168.1.50:8787
-# 指定固定 token 加 --token abc...；只本机用改 --addr 127.0.0.1:8787
+token=$(openssl rand -hex 32)
+echo "copy me: $token"                                    # 抄下来，第 5 步用
+LOGLENS_WHITELIST_DIRS=/var/log,/opt/service/logs \
+  sudo /usr/local/bin/loglens serve --addr 192.168.1.50:8787 --token "$token"
 ```
 
-token 存在 `/etc/loglens/token`（0600），之后随时 `sudo /usr/local/bin/loglens-serve.sh token` 查看。
-
-3. **日志主机本机自测**（另开终端）：
+3. **日志主机本机自测**（另开一个终端）：
 
 ```bash
 # 不带 token → 应返回 401
 curl -s -o /dev/null -w 'no-token: %{http_code}\n' -X POST http://127.0.0.1:8787/mcp -d '{}'
 # 带 token → 不应是 401
-TOKEN=$(sudo /usr/local/bin/loglens-serve.sh token)   # 或直接粘贴脚本 print 的 token
 curl -s -o /dev/null -w 'with-token: %{http_code}\n' \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
   -X POST http://127.0.0.1:8787/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
 ```
@@ -164,11 +162,31 @@ claude mcp add --scope user --transport http loglens-lan \
 
 `loglens-lan` 只是注册名，可随意改；同一份配置内唯一即可。
 
-6. **验证**：
+6. **验证并常驻**：
 
 ```bash
 claude mcp get loglens-lan          # 连接 OK 即通
-# 服务端排障 / 看日志: sudo /usr/local/bin/loglens-serve.sh status
+```
+
+确认后把第 2 步的前台进程换成 systemd 常驻（Ctrl-C 停掉，再建单元）：
+
+```ini
+# /etc/systemd/system/loglens.service
+[Unit]
+Description=LogLens MCP server
+After=network.target
+
+[Service]
+Environment=LOGLENS_WHITELIST_DIRS=/var/log,/opt/service/logs
+ExecStart=/usr/local/bin/loglens serve --addr 192.168.1.50:8787 --token 你的token
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl enable --now loglens
 ```
 
 **排障速查**：
@@ -263,7 +281,6 @@ loglens/
 │   ├── mcp/                  # MCP server（官方 go-sdk）、工具定义、schema
 │   ├── security/             # 白名单、路径解析防穿越、限额、超时
 │   └── tui/                  # (占位)
-├── scripts/                  # 部署辅助脚本（loglens-serve.sh：serve 一键装成 systemd 常驻）
 ├── docs/
 │   ├── REQUIREMENTS.md       # 需求与路线图（目标、非目标、里程碑）
 │   └── DESIGN.md             # 设计与实现（架构分层、关键技术决策）
