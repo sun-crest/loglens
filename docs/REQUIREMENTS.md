@@ -1,7 +1,7 @@
 # LogLens 需求与路线图
 
 > 本文档回答「这个工具该长成什么样」：为什么做、做什么、不做什么、做到哪了。
-> 使用方式见 [README](../README.md)，设计与实现见 [DESIGN.md](DESIGN.md)。
+> 使用方式见 [README](../README.md)，设计与实现见 [DESIGN.md](DESIGN.md)，一轮基于真实排查任务的体验缺陷分析见 [AGENT-EXPERIENCE-REVIEW.md](AGENT-EXPERIENCE-REVIEW.md)。
 
 ## 愿景与定位
 
