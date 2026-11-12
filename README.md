@@ -60,6 +60,8 @@ LOGLENS_MAX_LINES=2000 LOGLENS_MAX_BYTES=10485760 LOGLENS_TIMEOUT_MS=15000 \
 - `--token`（可选）：要求每个请求带 `Authorization: Bearer <token>`；即使走 SSH 隧道也建议开启。
 - TLS 不内置：公网直连请用 nginx 等前置代理终结 TLS。
 
+> **局域网直连（可选）**：同一局域网内想不建隧道直连，把 `--addr` 绑到内网 IP 并用强随机 token。注意这是**明文 HTTP**，信任边界 =「局域网内的可信设备」；要加密仍请走 SSH 隧道或前置 TLS。完整端到端流程见下方「方式 3 · 局域网直连」。绑定建议用具体内网 IP 而非 `0.0.0.0`——后者会把服务暴露到本机所有网卡（含 VPN）。
+
 ### 本地连接
 
 **方式 1 · SSH 隧道 + HTTP（推荐，常驻）**：先把远程端口映射到本机（保持前台或后台运行）：
@@ -96,6 +98,86 @@ ssh -N -L 8787:127.0.0.1:8787 user@your-server
   }
 }
 ```
+
+**方式 3 · 局域网直连（不建隧道，从零六步）**：同一局域网内服务器直连，按顺序照抄。`192.168.1.50` 与 `loglens-lan` 是示例，按实际替换。服务端用启动脚本 [scripts/loglens-serve.sh](scripts/loglens-serve.sh) 一步装成 systemd 常驻。
+
+1. **日志主机准备二进制与脚本**（在编译机执行）：
+
+```bash
+cd loglens && go build ./cmd/loglens
+scp loglens scripts/loglens-serve.sh user@192.168.1.50:~/
+ssh user@192.168.1.50 'sudo mv ~/loglens ~/loglens-serve.sh /usr/local/bin/'
+```
+
+2. **一键安装并启动**（在日志主机执行；自动生成/复用 token、写 systemd 单元、启动常驻并打印 token）：
+
+```bash
+sudo LOGLENS_WHITELIST_DIRS=/var/log,/opt/service/logs \
+  /usr/local/bin/loglens-serve.sh install --addr 192.168.1.50:8787
+# 指定固定 token 加 --token abc...；只本机用改 --addr 127.0.0.1:8787
+```
+
+token 存在 `/etc/loglens/token`（0600），之后随时 `sudo /usr/local/bin/loglens-serve.sh token` 查看。
+
+3. **日志主机本机自测**（另开终端）：
+
+```bash
+# 不带 token → 应返回 401
+curl -s -o /dev/null -w 'no-token: %{http_code}\n' -X POST http://127.0.0.1:8787/mcp -d '{}'
+# 带 token → 不应是 401
+TOKEN=$(sudo /usr/local/bin/loglens-serve.sh token)   # 或直接粘贴脚本 print 的 token
+curl -s -o /dev/null -w 'with-token: %{http_code}\n' \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -X POST http://127.0.0.1:8787/mcp \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+```
+
+4. **确认内网 IP、放行防火墙**（日志主机）：
+
+```bash
+ip addr | grep 'inet '          # 找到内网 IP，如 192.168.1.50
+sudo ufw allow 8787/tcp         # Ubuntu；RHEL: sudo firewall-cmd --add-port=8787/tcp
+```
+
+5. **本地注册**（开发机；把 IP 与 token 换成实际的）：
+
+```bash
+claude mcp add --scope user --transport http loglens-lan \
+  http://192.168.1.50:8787/mcp --header "Authorization: Bearer 你的token"
+```
+
+或直接写入 `~/.claude.json` 顶层 `mcpServers`：
+
+```json
+{
+  "mcpServers": {
+    "loglens-lan": {
+      "type": "http",
+      "url": "http://192.168.1.50:8787/mcp",
+      "headers": {
+        "Authorization": "Bearer 你的token"
+      }
+    }
+  }
+}
+```
+
+`loglens-lan` 只是注册名，可随意改；同一份配置内唯一即可。
+
+6. **验证**：
+
+```bash
+claude mcp get loglens-lan          # 连接 OK 即通
+# 服务端排障 / 看日志: sudo /usr/local/bin/loglens-serve.sh status
+```
+
+**排障速查**：
+
+| 现象 | 原因 |
+|---|---|
+| curl 返回 401 | token 不符 / 没带 `Authorization` header |
+| 连接拒绝 | 端口未监听、`--addr` 绑了别的 IP、防火墙未放行 |
+| 日志主机本机能连、别机超时 | 防火墙未放行 / 绑定仍是 `127.0.0.1`（忘改 addr） |
 
 ## Claude Code MCP 配置
 
@@ -181,6 +263,7 @@ loglens/
 │   ├── mcp/                  # MCP server（官方 go-sdk）、工具定义、schema
 │   ├── security/             # 白名单、路径解析防穿越、限额、超时
 │   └── tui/                  # (占位)
+├── scripts/                  # 部署辅助脚本（loglens-serve.sh：serve 一键装成 systemd 常驻）
 ├── docs/
 │   ├── REQUIREMENTS.md       # 需求与路线图（目标、非目标、里程碑）
 │   └── DESIGN.md             # 设计与实现（架构分层、关键技术决策）
