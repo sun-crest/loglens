@@ -103,11 +103,13 @@ func handleListLogFiles(cfg *security.Config) ToolHandler {
 		}
 
 		var files []logreader.FileInfo
+		truncated := false
 		for _, root := range roots {
 			list, err := logreader.ListFiles(root, logreader.ListOptions{
 				Glob:      glob,
 				Recursive: recursive,
-				MaxFiles:  cfg.Limits.MaxLines * 2,
+				MaxFiles:  maxFiles(cfg),
+				Truncated: &truncated,
 			})
 			if err != nil {
 				return errResult(fmt.Errorf("list %q: %w", root, err)), nil
@@ -118,10 +120,19 @@ func handleListLogFiles(cfg *security.Config) ToolHandler {
 			files = []logreader.FileInfo{}
 		}
 		return textResult(struct {
-			Count int                  `json:"count"`
-			Files []logreader.FileInfo `json:"files"`
-		}{len(files), files}), nil
+			Count     int                  `json:"count"`
+			Truncated bool                 `json:"truncated,omitempty"`
+			Files     []logreader.FileInfo `json:"files"`
+		}{len(files), truncated, files}), nil
 	}
+}
+
+// maxFiles returns the per-list file cap, defaulting when unset.
+func maxFiles(cfg *security.Config) int {
+	if cfg.Limits.MaxFiles > 0 {
+		return cfg.Limits.MaxFiles
+	}
+	return security.DefaultMaxFiles
 }
 
 // ---------------------------------------------------------------------------
@@ -228,8 +239,11 @@ LOGLENS_MAX_LINES. The "per_file" array reports each scanned file's coverage
 (bytes read/total, seek offset, first/last timestamp, completion) so a
 truncated result shows where scanning stopped; when a plain file is seeked
 (seek_offset > 0), entry "line" is the line's offset from that seek point, not
-an absolute file line. For a time bounded query, lines with no parseable
-timestamp are skipped and counted in "unparsed_lines".`
+an absolute file line. If truncated with reason "line limit reached", raise
+limit_lines or shrink the window; if reason is "byte budget exceeded", narrow
+the time window (or raise LOGLENS_MAX_BYTES server-side). For a time bounded
+query, lines with no parseable timestamp are skipped and counted in
+"unparsed_lines".`
 
 func handleGetLogSlice(cfg *security.Config, now func() time.Time) ToolHandler {
 	return func(ctx context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {

@@ -20,6 +20,8 @@ const (
 	DefaultMaxLines = 2000
 	// DefaultMaxBytes is the default LOGLENS_MAX_BYTES (10 MiB).
 	DefaultMaxBytes int64 = 10 << 20
+	// DefaultMaxFiles is the default LOGLENS_MAX_FILES (list_log_files cap).
+	DefaultMaxFiles = 5000
 	// DefaultTimeout is the default LOGLENS_TIMEOUT_MS.
 	DefaultTimeout = 15 * time.Second
 )
@@ -28,6 +30,7 @@ const (
 type Limits struct {
 	MaxLines int           // maximum lines returned by a single query
 	MaxBytes int64         // maximum bytes read from disk by a single query
+	MaxFiles int           // maximum files returned by list_log_files (0 = default)
 	Timeout  time.Duration // maximum wall-clock time for a single query
 }
 
@@ -52,6 +55,7 @@ func LoadConfigFromEnv() (*Config, error) {
 	cfg := &Config{Limits: Limits{
 		MaxLines: DefaultMaxLines,
 		MaxBytes: DefaultMaxBytes,
+		MaxFiles: DefaultMaxFiles,
 		Timeout:  DefaultTimeout,
 	}}
 
@@ -85,6 +89,13 @@ func LoadConfigFromEnv() (*Config, error) {
 			return nil, fmt.Errorf("LOGLENS_MAX_BYTES must be a positive integer, got %q", v)
 		}
 		cfg.Limits.MaxBytes = n
+	}
+	if v := os.Getenv("LOGLENS_MAX_FILES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("LOGLENS_MAX_FILES must be a positive integer, got %q", v)
+		}
+		cfg.Limits.MaxFiles = n
 	}
 	if v := os.Getenv("LOGLENS_TIMEOUT_MS"); v != "" {
 		n, err := strconv.Atoi(v)

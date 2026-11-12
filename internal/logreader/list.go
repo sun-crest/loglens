@@ -22,7 +22,8 @@ type ListOptions struct {
 	Root      string // absolute, already-whitelisted directory
 	Glob      string // filepath.Match pattern; with '/' matches the path relative to Root
 	Recursive bool
-	MaxFiles  int // 0 = unlimited
+	MaxFiles  int  // 0 = unlimited
+	Truncated *bool // if non-nil, set to true when MaxFiles cut the walk short
 }
 
 // ListFiles walks Root and returns regular files matching options, sorted by
@@ -42,6 +43,9 @@ func ListFiles(root string, opts ListOptions) ([]FileInfo, error) {
 			return err
 		}
 		if tooMany() {
+			if opts.Truncated != nil {
+				*opts.Truncated = true
+			}
 			return filepath.SkipAll
 		}
 		// Do not follow symlinks in listings; paths are re-resolved at read time.

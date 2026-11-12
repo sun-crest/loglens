@@ -15,7 +15,7 @@
 - P1（可诊断性不足）：`truncated` 结果不告知扫描覆盖了哪里，Agent 无法区分「真没有」与「没扫到」；
 - P1（行号语义漂移）：tail 返回的 `line` 是 seek 偏移后的相对行号，与普通搜索的真实行号不一致，二次定位不可靠。
 
-另有 4 项 P2 级次要问题（多文件预算不均、逐行时间解析开销、列表上限耦合、截断原因粒度）。
+另有 4 项 P2 级次要问题（多文件预算不均、逐行时间解析开销、列表上限耦合、截断原因粒度），均已实现（见 P0/P1/P2 落地记录）。
 
 ## P0 优化落地记录（2026-11-12）
 
@@ -58,7 +58,13 @@ seek / tail 查询中 `entry.line` 是相对扫描起点的行号，`FileScan.se
 
 新增 `per_file_budget` 选项（`search_logs` / `get_log_slice` 均可传）：每个文件独立享有一份 `LOGLENS_MAX_BYTES`，不再共享一个全局预算。同时修正 `Run` 循环：per-file 模式下单个文件截断不会 cascade 终止后续文件（`TestPerFileBudgetTruncatedOneStillScansOthers` 验证）。默认关闭，保持既有共享预算行为不变。
 
-> 剩余：P2 · `ExtractLineTime` 短路已随 P1-1 顺带完成；P2 · `list_log_files` 独立上限、P2 · 截断原因粒度仍待办。
+> 剩余：~~P2 · `ExtractLineTime` 短路~~ ✅、~~P2 · `list_log_files` 独立上限~~ ✅、P2 · 截断原因细化 ✅。
+
+## P2 优化落地记录（2026-11-12）
+
+- `ExtractLineTime` 短路：随 P1 落地时顺带完成（`scanReader` 每行只解析一次，fs 元数据与 entry 时间复用同一结果）。
+- `list_log_files` 独立上限：新增 `security.Limits.MaxFiles` + `LOGLENS_MAX_FILES` 环境变量（默认 5000），与 `MaxLines` 解耦；响应新增 `truncated` 字段，按上限截断时显式告知。
+- 截断原因细粒度：`reason` 已区分 `line limit reached` 与 `byte budget exceeded`，工具描述补充对应换参引导（缩窗口 vs 调 limit / MAX_BYTES）；README「安全上限速查」同步说明 `per_file` 覆盖与 `LOGLENS_MAX_FILES`。
 
 ## 触发场景（复现步骤)
 
@@ -157,8 +163,8 @@ seek / tail 查询中 `entry.line` 是相对扫描起点的行号，`FileScan.se
 | **P1** | 多文件预算按文件分配 | ✅ 已实现:`per_file_budget` 选项,每文件独立 MaxBytes;per-file 截断不再 cascade 终止其余文件 | 问题 4 |
 | **P1** | tail 行号修正 | ✅ 已实现:`FileScan.seek_offset` 显式标注 line 的相对偏移,`seek_offset=0` 时 line 即真实行号 | 问题 6,二次定位锚点漂移 |
 | **P2** | `ExtractLineTime` 短路 | 首字节命中 `\d` `/` `[` `{` 等判型后再进 layout 循环,降低高频轮询日志解析成本 | 性能 |
-| **P2** | `list_log_files` 独立上限 | `MaxFiles` 与 `MaxLines` 解耦或以环境变量单独配置,截断时显式告知 | 列表可靠性 |
-| **P2** | 截断原因细粒度化 | 区分「字节预算先触顶」与「行数先触顶」,并在工具描述中引导对应换参 | 诊断 |
+| **P2** | `list_log_files` 独立上限 | ✅ 已实现:`LOGLENS_MAX_FILES` 环境变量(默认 5000)与 `MaxLines` 解耦,响应含 `truncated` 标志 | 列表可靠性 |
+| **P2** | 截断原因细粒度化 | ✅ 已实现:`reason` 区分行数/字节预算触顶,工具描述带换参引导 | 诊断 |
 
 ## 验收建议
 

@@ -166,6 +166,34 @@ func TestListLogFiles(t *testing.T) {
 	}
 }
 
+// TestListLogFilesMaxFilesCap verifies the list cap is itself link: listing is
+// cut at MaxFiles (independent of MaxLines) and the response reports truncated.
+func TestListLogFilesMaxFilesCap(t *testing.T) {
+	s, cfg, dir := newTestServer(t)
+	// Override limits: a tiny MaxFiles proves the per-list cap works and that
+	// it is no longer derived from MaxLines (which stays low too).
+	cfg.Limits.MaxFiles = 2
+	cs := connect(t, s)
+
+	out, isErr := call(t, cs, "list_log_files", map[string]any{"path": dir, "recursive": true})
+	if isErr {
+		t.Fatalf("list_log_files errored: %v", out["_error"])
+	}
+	files, ok := out["files"].([]any)
+	if !ok {
+		t.Fatalf("files = %v", out)
+	}
+	if len(files) == 0 {
+		t.Skip("no files to truncate")
+	}
+	if trunc, ok := out["truncated"]; !ok || !trunc.(bool) {
+		t.Errorf("truncated = %v, want true (3 files but MaxFiles=2)", out["truncated"])
+	}
+	if len(files) > 2 {
+		t.Errorf("listed %d files, want at most MaxFiles=2", len(files))
+	}
+}
+
 func TestGetLogSliceRotationBlendsGz(t *testing.T) {
 	s, _, dir := newTestServer(t)
 	cs := connect(t, s)

@@ -252,9 +252,10 @@ claude mcp add --scope user loglens -- loglens mcp \
 - `LOGLENS_WHITELIST_DIRS`：允许访问的日志目录，逗号分隔，**禁止访问白名单以外路径**
 - `LOGLENS_MAX_LINES`：单次查询最大返回行数
 - `LOGLENS_MAX_BYTES`：单次读取最大字节上限
+- `LOGLENS_MAX_FILES`：`list_log_files` 单次最多返回的文件数（默认 5000）
 - `LOGLENS_TIMEOUT_MS`：单次查询超时，超时直接终止任务并返回已读取的部分
 
-超过任一上限时不报错，而是返回**部分结果 + `truncated` 标记与原因**。
+超过任一上限时不报错，而是返回**部分结果 + `truncated` 标记与原因**（查询响应的 `per_file` 数组会说明各文件扫描到哪、`reason` 区分是行数还是字节预算先触顶，以便选择「缩小窗口 / 调整 limit」）。
 
 ## 当前 MCP 工具
 
