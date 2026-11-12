@@ -18,7 +18,7 @@ Slogan：*Logs observed by humans and analyzed by agents.*
 ### 构建与测试
 
 ```bash
-go build ./cmd/loglens          # 生成二进制 loglens
+CGO_ENABLED=0 go build ./cmd/loglens   # 静态编译:产物不依赖系统 glibc,可拷到任意 Linux(含旧版发行版)
 go test ./...                   # 单元 + 集成测试（内部通过官方 SDK 客户端走完整 MCP 握手，stdio 与 HTTP 两套传输）
 go test -race ./...             # 竞态检测
 
@@ -104,7 +104,7 @@ ssh -N -L 8787:127.0.0.1:8787 user@your-server
 1. **日志主机准备二进制**（在编译机执行）：
 
 ```bash
-cd loglens && go build ./cmd/loglens
+cd loglens && CGO_ENABLED=0 go build ./cmd/loglens
 scp loglens user@192.168.1.50:~/
 ssh user@192.168.1.50 'sudo mv ~/loglens /usr/local/bin/'
 ```
@@ -114,8 +114,9 @@ ssh user@192.168.1.50 'sudo mv ~/loglens /usr/local/bin/'
 ```bash
 token=$(openssl rand -hex 32)
 echo "copy me: $token"                                    # 抄下来，第 5 步用
-LOGLENS_WHITELIST_DIRS=/var/log,/opt/service/logs \
-  sudo /usr/local/bin/loglens serve --addr 192.168.1.50:8787 --token "$token"
+# sudo 默认丢弃环境变量(env_reset),须用 `sudo env` 传 LOGLENS_WHITELIST_DIRS;--token 是命令行参数不受影响
+sudo env LOGLENS_WHITELIST_DIRS=/var/log,/opt/service/logs \
+  /usr/local/bin/loglens serve --addr 192.168.1.50:8787 --token "$token"
 ```
 
 3. **日志主机本机自测**（另开一个终端）：
@@ -242,7 +243,7 @@ claude mcp add --scope user loglens -- loglens mcp \
   -e LOGLENS_TIMEOUT_MS=15000
 ```
 
-> **注意**：`command: "loglens"` 要求 `loglens` 已装入 PATH。否则请写绝对路径 `"command": "/path/to/loglens"`，或 `go build ./cmd/loglens && cp loglens ~/.local/bin/`。
+> **注意**：`command: "loglens"` 要求 `loglens` 已装入 PATH。否则请写绝对路径 `"command": "/path/to/loglens"`，或 `CGO_ENABLED=0 go build ./cmd/loglens && cp loglens ~/.local/bin/`。
 
 ## 安全上限速查
 
