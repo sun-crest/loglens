@@ -259,9 +259,11 @@ claude mcp add --scope user loglens -- loglens mcp \
 
 ## 当前 MCP 工具
 
-- `list_log_files`：列出白名单目录下日志文件，支持 glob、递归、识别 gz 轮转文件
-- `get_log_slice`：按【起止时间 + 关键词 + 上下文行数】切片日志（核心，自动合并 `base.N[.gz]` 轮转组）
-- `search_logs`：关键词 / 正则检索日志，支持排除关键词、忽略大小写、跨文件
+- `list_log_files`：列出白名单目录下日志文件，支持 glob、递归、识别 gz 轮转文件；`sort: "time"` 按修改时间降序（最新在前）方便找最新日志
+- `get_log_slice`：按【起止时间 + 关键词 + 上下文行数】切片日志（核心，自动合并 `base.N[.gz]` 轮转组）。无时间窗时返回最近行（tail），带关键词则返回最近匹配
+- `search_logs`：关键词 / 正则检索日志，支持排除关键词、忽略大小写、跨文件。设 `tail_backwards: true` 可从最新文件末尾反向扫描、直接拿到**最近一次命中**（不猜时间窗，适合「最近一次调用某接口」这类诉求；字节预算限制回扫范围，截断结果用 `per_file` 标明覆盖）
+
+> **响应体积护栏**：`max_line_chars` 截断超长单行（标记 `text_truncated`）、`max_result_chars` 限制聚合返回文本，防止一条 100 KB 的 JSON 行或宽关键词洪水撑爆 MCP 响应；truncated / 0 命中时响应带 `summary` 字段给出换参建议。
 
 规划中的新工具见 [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)。
 

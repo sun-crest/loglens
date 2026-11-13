@@ -623,3 +623,288 @@ func TestTailWithKeywords(t *testing.T) {
 		t.Errorf("last entry should be the newest match msg-27, got %q", last)
 	}
 }
+
+// TestTailBackwards finds the latest keyword matches in the MIDDLE of a large
+// file via reverse scanning (P0: "latest occurrence of X" needs no time-window
+// guessing). Without TailBackwards a bounded tail window would only cover the
+// end; here the targets sit well before the tail window.
+func TestTailBackwardsFindsMidFileMatches(t *testing.T) {
+	cfg, dir := newCfg(t)
+	file := filepath.Join(dir, "tb.log")
+	var sb strings.Builder
+	const n = 200
+	for i := 0; i < n; i++ {
+		line := fmt.Sprintf("2026-11-10T12:%02d:%02d.000Z INFO msg-%03d", i/60, i%60, i)
+		if i%40 == 7 { // WANT at i=7,47,87,127,167; latest is 167
+			line += " WANT"
+		}
+		sb.WriteString(line + "\n")
+	}
+	if err := os.WriteFile(file, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// All targets are within the first ~90% of the file; a forward tail window
+	// equal to the last 3 lines' worth would not see them, but the reverse
+	// scan covers the whole file.
+	res := mustRun(t, Options{Policy: cfg, Limits: cfg.Limits, Files: []string{file},
+		LimitLines: 3, Keywords: []string{"WANT"}, TailBackwards: true,
+		// Not needed but explicit: reverse tail ignores FullScan.
+		// FullScan: true,
+	})
+	if res.Truncated {
+		t.Fatalf("truncated: %s", res.Reason)
+	}
+	if res.TotalMatched != 3 {
+		t.Fatalf("matched = %d, want 3 (latest WANT rows)", res.TotalMatched)
+	}
+	// Chronological order: oldest of the three first, newest (167) last.
+	if !strings.Contains(res.Entries[0].Text, "msg-087") {
+		t.Errorf("first entry should be msg-087, got %q", res.Entries[0].Text)
+	}
+	if !strings.Contains(res.Entries[len(res.Entries)-1].Text, "msg-167") {
+		t.Errorf("last entry should be newest match msg-167, got %q", res.Entries[0].Text)
+	}
+}
+
+// TestTailBackwardsUnderBudget verifies that a reverse scan reports truncated
+// coverage when the byte budget runs out before reaching the file head, and
+// that the per-file scan notes the partial coverage.
+func TestTailBackwardsUnderBudget(t *testing.T) {
+	cfg, dir := newCfg(t)
+	file := filepath.Join(dir, "tb2.log")
+	var sb strings.Builder
+	for i := 0; i < 50; i++ {
+		// Lines are large so 50 lines far exceed a small budget.
+		line := fmt.Sprintf("2026-11-10T12:%02d:00.000Z INFO msg-%02d %s", i, i,
+			strings.Repeat("x", 300))
+		if i%2 == 0 { // every even line is a WANT, so the tail always contains one
+			line += " WANT"
+		}
+		sb.WriteString(line + "\n")
+	}
+	if err := os.WriteFile(file, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lim := cfg.Limits
+	lim.MaxBytes = 900
+	cfg2 := &security.Config{Dirs: cfg.Dirs, Limits: lim}
+	res := mustRun(t, Options{Policy: cfg2, Limits: lim, Files: []string{file},
+		LimitLines: 10, Keywords: []string{"WANT"}, TailBackwards: true})
+	if !res.Truncated {
+		t.Fatal("expected truncated=true when reverse scan runs out of budget")
+	}
+	if res.PerFile[0].BytesRead >= res.PerFile[0].BytesTotal {
+		t.Errorf("reverse scan should not read the whole file under budget; read=%d total=%d",
+			res.PerFile[0].BytesRead, res.PerFile[0].BytesTotal)
+	}
+	// Some WANT rows must still be found from the tail.
+	if res.TotalMatched == 0 {
+		t.Error("expected at least one match from the scanned tail")
+	}
+}
+
+// TestTailBackwardsIgnoresFullScan verifies search_logs' FullScan=true does
+// not suppress a reverse-tail query: the latest WANT in a large file is found
+// without a time window, even though FullScan would otherwise force a whole-file
+// forward scan of the newest file's tail window only.
+func TestTailBackwardsIgnoresFullScan(t *testing.T) {
+	cfg, dir := newCfg(t)
+	file := filepath.Join(dir, "tbf.log")
+	var sb strings.Builder
+	for i := 0; i < 120; i++ {
+		line := fmt.Sprintf("2026-11-10T12:%02d:%02d.000Z INFO msg-%03d", i/60, i%60, i)
+		if i%50 == 5 { // WANT at 5, 55, 105; newest = 105
+			line += " WANT"
+		}
+		sb.WriteString(line + "\n")
+	}
+	if err := os.WriteFile(file, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := mustRun(t, Options{Policy: cfg, Limits: cfg.Limits, Files: []string{file},
+		FullScan: true, TailBackwards: true, LimitLines: 1, Keywords: []string{"WANT"}})
+	if res.Truncated {
+		t.Fatalf("truncated: %s", res.Reason)
+	}
+	if res.TotalMatched != 1 {
+		t.Fatalf("matched = %d, want 1 (the single latest WANT)", res.TotalMatched)
+	}
+	if !strings.Contains(res.Entries[0].Text, "msg-105") {
+		t.Errorf("should find the latest WANT msg-105, got %q", res.Entries[0].Text)
+	}
+}
+
+// TestTailBackwardsReportsCoverage checks scanned_from/to are reported in file
+// order (head -> tail) regardless of the reverse scan direction.
+func TestTailBackwardsReportsCoverage(t *testing.T) {
+	cfg, dir := newCfg(t)
+	file := filepath.Join(dir, "tbc.log")
+	var sb strings.Builder
+	for i := 0; i < 20; i++ {
+		sb.WriteString(fmt.Sprintf("2026-11-10T12:00:%02d.000Z INFO msg-%02d\n", i, i))
+	}
+	if err := os.WriteFile(file, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := mustRun(t, Options{Policy: cfg, Limits: cfg.Limits, Files: []string{file},
+		TailBackwards: true, LimitLines: 20, Keywords: []string{"INFO"}})
+	if res.Truncated {
+		t.Fatalf("truncated: %s", res.Reason)
+	}
+	if len(res.PerFile) != 1 {
+		t.Fatalf("per_file len = %d, want 1", len(res.PerFile))
+	}
+	fs := res.PerFile[0]
+	if fs.ScannedFrom == nil || fs.ScannedTo == nil {
+		t.Fatal("expected scanned_from/scanned_to on reverse tail")
+	}
+	if !strings.HasPrefix(*fs.ScannedFrom, "2026-11-10T12:00:00") {
+		t.Errorf("scanned_from should be the head-side (00), got %q", *fs.ScannedFrom)
+	}
+	if !strings.HasPrefix(*fs.ScannedTo, "2026-11-10T12:00:19") {
+		t.Errorf("scanned_to should be the tail-side (19), got %q", *fs.ScannedTo)
+	}
+	if !fs.Complete {
+		t.Error("expected complete=true: whole file scanned within budget")
+	}
+}
+	// TestTailBackwardsNoNewlineAtEOF ensures reverse scanning handles a file whose
+// last line has no trailing newline (partial carry across the EOF boundary).
+func TestTailBackwardsNoNewlineAtEOF(t *testing.T) {
+	cfg, dir := newCfg(t)
+	file := filepath.Join(dir, "tb3.log")
+	content := "2026-11-10T12:00:00.000Z INFO msg-00 WANT\n" +
+		"2026-11-10T12:00:01.000Z INFO msg-01 WANT" // no trailing newline
+	// Make the file long enough to span two reverse chunks and end without \n.
+	for i := 2; i < 60; i++ {
+		content += "\n2026-11-10T12:00:%02d.000Z INFO msg-%02d" + fmt.Sprintf("%02d", i) + " PAYLOAD " + strings.Repeat("q", 40)
+	}
+	if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := mustRun(t, Options{Policy: cfg, Limits: cfg.Limits, Files: []string{file},
+		LimitLines: 5, Keywords: []string{"WANT"}, TailBackwards: true})
+	if res.Truncated {
+		t.Fatalf("truncated: %s", res.Reason)
+	}
+	// msg-01 is the newest WANT and has no trailing newline.
+	if len(res.Entries) < 2 {
+		t.Fatalf("entries = %d, want msg-00 and msg-01", len(res.Entries))
+	}
+	last := res.Entries[len(res.Entries)-1].Text
+	if !strings.Contains(last, "msg-01") {
+		t.Errorf("last entry should be newest match msg-01, got %q", last)
+	}
+}
+
+// TestMaxLineCharsTruncation verifies a single mega-JSON line is cut to the
+// MaxLineChars cap and flagged, so it cannot blow up the MCP response alone.
+func TestMaxLineCharsTruncation(t *testing.T) {
+	cfg, dir := newCfg(t)
+	file := filepath.Join(dir, "long.log")
+	long := "2026-11-10T12:00:00.000Z INFO " + strings.Repeat("x", 20_000) + " WANT\n"
+	if err := os.WriteFile(file, []byte(long), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := mustRun(t, Options{Policy: cfg, Limits: cfg.Limits, Files: []string{file},
+		HasBounds:     true,
+		Start:         time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC),
+		End:           time.Date(2026, 11, 10, 12, 0, 9, 0, time.UTC),
+		LimitLines:    2,
+		MaxLineChars:  1024,
+		MaxResultChars: -1, // exercise both fields being set
+	})
+	if res.TotalMatched != 1 {
+		t.Fatalf("matched = %d, want 1", res.TotalMatched)
+	}
+	e := res.Entries[0]
+	if !e.TextTruncated {
+		t.Error("expected TextTruncated=true for an over-cap line")
+	}
+	if len(e.Text) > 1024 {
+		t.Errorf("text len = %d, want <= 1024", len(e.Text))
+	}
+	if res.Truncated {
+		t.Errorf("unexpected truncated (MaxResultChars=-1 disables the cap): %s", res.Reason)
+	}
+}
+
+// TestMaxResultCharsTruncation verifies the aggregate char budget drops extra
+// entries and flags the result, so a wide keyword + context flood cannot blow
+// up the response.
+func TestMaxResultCharsTruncation(t *testing.T) {
+	cfg, dir := newCfg(t)
+	file := filepath.Join(dir, "flood.log")
+	var sb strings.Builder
+	for i := 0; i < 50; i++ {
+		sb.WriteString(fmt.Sprintf("2026-11-10T12:00:%02d.000Z INFO msg-%02d WANT\n", i, i))
+	}
+	if err := os.WriteFile(file, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := mustRun(t, Options{Policy: cfg, Limits: cfg.Limits, Files: []string{file},
+		HasBounds: true,
+		Start:     time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC),
+		End:       time.Date(2026, 11, 10, 12, 0, 50, 0, time.UTC),
+		// 50 rows * ~80 chars each far exceeds a 500-char budget.
+		MaxResultChars: 500,
+	})
+	if !res.Truncated {
+		t.Fatal("expected truncated=true when result char budget exceeded")
+	}
+	if !strings.Contains(res.Reason, "max_result_chars") {
+		t.Errorf("reason = %q, want max_result_chars mention", res.Reason)
+	}
+	total := 0
+	for _, e := range res.Entries {
+		total += len(e.Text)
+	}
+	if total > 500 {
+		t.Errorf("total returned chars = %d, want <= 500", total)
+	}
+}
+
+// TestSummaryForEmptyAndTruncated verifies the human/agent-readable summary is
+// populated for empty (full coverage) and truncated results.
+func TestSummaryForEmptyAndTruncated(t *testing.T) {
+	cfg, dir := newCfg(t)
+
+	// 1. Clean full scan with no matches → summary tells "no matches in range".
+	empty := filepath.Join(dir, "empty.log")
+	makeLog(t, empty, 10)
+	res := mustRun(t, Options{Policy: cfg, Limits: cfg.Limits, Files: []string{empty},
+		HasBounds: true,
+		Start:     time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC),
+		End:       time.Date(2026, 11, 10, 12, 0, 9, 0, time.UTC),
+		Keywords:  []string{"NOPE"}})
+	if res.Truncated {
+		t.Fatalf("expected clean 0-match scan, got truncated: %s", res.Reason)
+	}
+	if res.Summary == "" {
+		t.Error("expected a summary for a 0-match result")
+	}
+	if !strings.Contains(res.Summary, "no matches") {
+		t.Errorf("summary = %q, want 'no matches' guidance", res.Summary)
+	}
+
+	// 2. Truncated result → summary explains what to change.
+	big := filepath.Join(dir, "big2.log")
+	if err := os.WriteFile(big, []byte(strings.Repeat("2026-11-10T12:00:00.000Z INFO WANT\n", 60)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res = mustRun(t, Options{Policy: cfg, Limits: cfg.Limits, Files: []string{big},
+		HasBounds: true,
+		Start:     time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC),
+		End:       time.Date(2026, 11, 10, 12, 0, 9, 0, time.UTC),
+		LimitLines: 5, Keywords: []string{"WANT"}})
+	if !res.Truncated {
+		t.Fatal("expected line-limit truncation")
+	}
+	if res.Summary == "" {
+		t.Error("expected a summary for a line-limit truncated result")
+	}
+	if !strings.Contains(res.Summary, "line cap") {
+		t.Errorf("summary = %q, want line-cap guidance", res.Summary)
+	}
+}

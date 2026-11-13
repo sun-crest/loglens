@@ -5,6 +5,7 @@ package query
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -22,10 +23,11 @@ import (
 
 // Entry is a single returned log line (a hit or a context line).
 type Entry struct {
-	File string  `json:"file"`
-	Line int64   `json:"line"`
-	Time *string `json:"time,omitempty"` // RFC3339Nano (UTC) when parsed
-	Text string  `json:"text"`
+	File          string  `json:"file"`
+	Line          int64   `json:"line"`
+	Time          *string `json:"time,omitempty"` // RFC3339Nano (UTC) when parsed
+	Text          string  `json:"text"`
+	TextTruncated bool    `json:"text_truncated,omitempty"` // text cut at MaxLineChars
 }
 
 // FileScan summarizes how one file was scanned, so the MCP caller can see the
@@ -50,7 +52,11 @@ type Result struct {
 	Truncated     bool       `json:"truncated"`                // true if a limit cut results short
 	Reason        string     `json:"reason,omitempty"`
 	PerFile       []FileScan `json:"per_file"` // per-file scan coverage (omitempty when empty)
+	Summary       string     `json:"summary,omitempty"` // human-readable guidance for truncated / empty results
 
+	// internal accounting, not serialized:
+	returnedChars int  // bytes of entry text appended so far
+	charCapped    bool // MaxResultChars tripped (distinguishes from line cap)
 }
 
 // Options configures a single query run.
@@ -73,17 +79,32 @@ type Options struct {
 	// search_logs, whose no-bounds + keywords contract is a whole-|file| search;
 	// get_log_slice without bounds keeps the cheap tail semantics instead.
 	FullScan bool
+	// TailBackwards scans a plain file from its end toward the head and returns
+	// the most recent LimitLines matches — an efficient "latest occurrence of
+	// keyword X" primitive, effective even when the target sits in the middle of
+	// a large file (no time-window guessing). Conflicting with time bounds /
+	// context; gz files fall back to a forward scan with a rolling match window.
+	TailBackwards bool
 	// PerFileBudget gives each file its own MaxBytes instead of sharing one
 	// global budget across files, so one oversized file cannot starve the rest.
 	PerFileBudget bool
+	// MaxResultChars caps the total chars of returned entry text (0 = uncapped).
+	// Entries beyond the cap are dropped and results flagged truncated, matching
+	// per_line_limit semantics — protects the MCP response from token blow-up.
+	MaxResultChars int
+	// MaxLineChars caps a single returned line's text (0 = uncapped). Longer
+	// lines are cut and Entry.TextTruncated is set, so one mega-JSON line cannot
+	// blow up the response on its own.
+	MaxLineChars int
 }
 
 // tailMode reports whether the query reads only the tail window of the newest
 // file: no time bounds, no context lines. Keywords/exclude filters are allowed
 // and are applied inside the tail window (returns the most recent matching
-// lines). FullScan suppresses tail so search stays whole-file.
+// lines). FullScan suppresses tail so search stays whole-file. TailBackwards
+// forces the reverse-tail path even when FullScan is set (search_logs).
 func (o *Options) tailMode() bool {
-	if o.FullScan {
+	if o.FullScan && !o.TailBackwards {
 		return false
 	}
 	return !o.HasBounds && o.ContextBefore == 0 && o.ContextAfter == 0 && len(o.Files) > 0
@@ -144,6 +165,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	if opts.SortByTime && opts.HasBounds && opts.ContextBefore == 0 && opts.ContextAfter == 0 {
 		sortEntriesByTime(res.Entries)
 	}
+	buildSummary(res, &opts)
 	return res, nil
 }
 
@@ -315,8 +337,9 @@ func scanReader(ctx context.Context, rc io.Reader, resolved string, opts *Option
 			}
 			s := tt.UTC().Format(time.RFC3339Nano)
 			entryTime = &s
-		} else if tt, ok := parser.ExtractLineTime(l.Raw, now); ok {
-			// No bounds, but surface the timestamp when we can read one.
+		} else if hasTime {
+			// No bounds: surface the timestamp already parsed above (one parse
+			// per line, no duplicate ExtractLineTime call).
 			s := tt.UTC().Format(time.RFC3339Nano)
 			entryTime = &s
 		}
@@ -358,7 +381,11 @@ func scanReader(ctx context.Context, rc io.Reader, resolved string, opts *Option
 		fs.Complete = true
 	case errors.Is(scanErr, errResultFull):
 		res.Truncated = true
-		res.Reason = "line limit reached"
+		if res.charCapped {
+			res.Reason = "result char limit (max_result_chars) exceeded"
+		} else {
+			res.Reason = "line limit reached"
+		}
 	case errors.Is(scanErr, logreader.ErrBudgetExceeded):
 		res.Truncated = true
 		res.Reason = "byte budget (LOGLENS_MAX_BYTES) exceeded"
@@ -382,11 +409,39 @@ func pushContext(buf []Entry, e Entry, cap int) []Entry {
 	return append(buf, e)
 }
 
-// appendEntry appends e to res.Entries, enforcing the returned-line cap.
+// capText caps text at opts.MaxLineChars (0 = uncapped), cutting at a rune
+// boundary so multi-byte UTF-8 is not split. The caller sets TextTruncated from
+// the boolean. Single mega-JSON lines cannot blow up a response on their own.
+func (o *Options) capText(text string) (string, bool) {
+	if o.MaxLineChars <= 0 || len(text) <= o.MaxLineChars {
+		return text, false
+	}
+	// Walk back to the last rune start so we never split a rune.
+	cut := o.MaxLineChars
+	for cut > 0 && cut < len(text) && text[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return text[:cut], true
+}
+
+// appendEntry appends e to res.Entries, enforcing the returned-line cap and
+// the returned-char budget. Entry text is capped at MaxLineChars first, so the
+// char budget measures post-capping bytes.
 func appendEntry(res *Result, opts *Options, e Entry) bool {
+	if opts.MaxLineChars > 0 {
+		if t, on := opts.capText(e.Text); on {
+			e.Text = t
+			e.TextTruncated = true
+		}
+	}
 	if len(res.Entries) >= opts.LimitLines {
 		return false
 	}
+	if opts.MaxResultChars > 0 && res.returnedChars+len(e.Text) > opts.MaxResultChars {
+		res.charCapped = true
+		return false
+	}
+	res.returnedChars += len(e.Text)
 	res.Entries = append(res.Entries, e)
 	return true
 }
@@ -444,6 +499,9 @@ func runTail(ctx context.Context, opts Options, m *matcher, res *Result, now tim
 		Close() error
 	}
 	if logreader.IsGzip(resolved) {
+		// gz cannot seek backwards; a forward scan with a rolling match window
+		// already keeps only the most recent matches, which satisfies both the
+		// plain tail and reverse-tail ("latest N matches") contracts.
 		rc, err = logreader.OpenRead(resolved)
 		if err != nil {
 			return nil, err
@@ -461,6 +519,27 @@ func runTail(ctx context.Context, opts Options, m *matcher, res *Result, now tim
 		if iterErr != nil {
 			res.Reason = tailReason(iterErr)
 		}
+	} else if opts.TailBackwards {
+		// Reverse scan of a plain file: read chunks from the file end toward the
+		// head, split complete lines, keep the most recent matches. Unlike the
+		// seek-to-tail window, this covers the whole file within the byte budget,
+		// so "latest occurrence of X" works even when the target sits in the
+		// middle of a large log.
+		if f, opErr := os.Open(resolved); opErr == nil {
+			entries, rerr := reverseTailEntries(ctx, f, &opts, m, res, &fs, now)
+			_ = f.Close()
+			if rerr != nil {
+				return nil, rerr
+			}
+			res.Entries = entries
+		} else {
+			return nil, opErr
+		}
+		res.TotalMatched = len(res.Entries)
+		finalizeEntries(res, &opts)
+		buildSummary(res, &opts)
+		res.PerFile = append(res.PerFile, fs)
+		return res, nil
 	} else {
 		f, opErr := os.Open(resolved)
 		if opErr != nil {
@@ -493,8 +572,300 @@ func runTail(ctx context.Context, opts Options, m *matcher, res *Result, now tim
 
 	res.Entries = ring.head()
 	res.TotalMatched = len(res.Entries)
+	finalizeEntries(res, &opts)
+	buildSummary(res, &opts)
 	res.PerFile = append(res.PerFile, fs)
 	return res, nil
+}
+
+// reverseChunkSize is how many bytes are read per backward chunk scan.
+const reverseChunkSize = 256 << 10 // 256 KiB
+
+// reverseTailEntries scans a plain file from its end toward the head,
+// splitting complete lines (handling chunks that start mid-line) and returning
+// the most recent LimitLines entries that match m. Scanning stops as soon as
+// the match limit is reached, so "latest occurrence of X" reads only as much of
+// the file tail as needed. Bytes read are charged to the shared budget through
+// res/budget handling in the caller: this function stops early when the context
+// is done; budget exhaustion is the caller's responsibility via the matcher-free
+// split loop (it just stops emitting past the limit).
+//
+// The returned entries are ordered newest -> oldest (the order scanning
+// produces); runTail's caller contract expects chronological order, so callers
+// must reverse before returning.
+func reverseTailEntries(ctx context.Context, f *os.File, opts *Options, m *matcher, res *Result, fs *FileScan, now time.Time) ([]Entry, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		return nil, err
+	}
+	size, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return nil, err
+	}
+	fs.BytesTotal = size
+
+	limit := opts.LimitLines
+	if limit <= 0 {
+		limit = opts.Limits.MaxLines
+	}
+
+	var (
+		out   []Entry // newest -> oldest
+		carry []byte  // partial line head not yet emitted
+		// Covered range of timestamps in file order (min = head side, max = tail
+		// side), independent of the reverse scan direction.
+		haveMin bool
+		haveMax bool
+		minT, maxT time.Time
+	)
+
+	emit := func(line []byte) {
+		lineStr := strings.TrimSuffix(string(line), "\n")
+		if lineStr == "" {
+			return
+		}
+		var t *string
+		if tt, ok := parser.ExtractLineTime(line, now); ok {
+			s := tt.UTC().Format(time.RFC3339Nano)
+			t = &s
+			if !haveMin || tt.Before(minT) {
+				haveMin = true
+				minT = tt
+			}
+			if !haveMax || tt.After(maxT) {
+				haveMax = true
+				maxT = tt
+			}
+		}
+		if m != nil && !m.matches(lineStr) {
+			return
+		}
+		if len(out) < limit {
+			out = append(out, Entry{File: fs.File, Text: lineStr, Time: t})
+		}
+	}
+
+	// scanChunk processes one reversed chunk. buf holds bytes read from the
+	// file; rev processes from the end toward the head. When the chunk starts
+	// mid-line, that partial head is stored into *carry to prepend to the next
+	// older chunk's tail.
+	var (
+		buf    []byte
+		bufPos int
+	)
+	budget := opts.Limits.MaxBytes - res.ScannedBytes
+	if budget <= 0 {
+		budget = 0
+	}
+	pos := size
+	for pos > 0 {
+		if ctx.Err() != nil {
+			fs.Complete = false
+			res.Truncated = true
+			res.Reason = "query timeout reached"
+			break
+		}
+		n := int64(reverseChunkSize)
+		if n > pos {
+			n = pos
+		}
+		if n > budget {
+			// Budget limits how much we may read this round. Clamp the chunk to
+			// the remaining budget and read it; the next round detects a zero
+			// budget and stops with truncated coverage.
+			n = budget
+		}
+		if n <= 0 {
+			// Byte budget exhausted before reaching the file head: stop and
+			// report a partial reverse scan so the caller knows it must either
+			// narrow the search or enlarge LOGLENS_MAX_BYTES.
+			fs.Complete = false
+			res.Truncated = true
+			res.Reason = "byte budget (LOGLENS_MAX_BYTES) exceeded"
+			break
+		}
+		start := pos - n
+		pos = start
+		budget -= n
+
+		if cap(buf) < int(n) {
+			buf = make([]byte, n)
+		}
+		buf = buf[:n]
+		if _, err := f.ReadAt(buf, start); err != nil && err != io.EOF {
+			return nil, err
+		}
+		res.ScannedBytes += n
+		fs.BytesRead += n
+
+		// Walk buf from end to start, splitting on '\n'. The piece before the
+		// first '\n' found scanning backward is a partial line head: prepend
+		// carry (from a later chunk, if any) and carry the result forward.
+		bufPos = int(n)
+		// Walk buf from end to start, splitting on '\n'. A piece before the
+		// first '\n' found scanning backward is a partial line head whose
+		// remainder lives in an older chunk; carry it forward.
+		for bufPos > 0 {
+			idx := bytes.LastIndexByte(buf[:bufPos], '\n')
+			if idx < 0 {
+				// No newline in the scanned prefix: this piece is a partial
+				// line head; prepend any carry from a later (newer) chunk since
+				// carry bytes occur after these in the file, and this piece is
+				// the earlier part of the same line.
+				piece := buf[:bufPos]
+				if carry != nil {
+					merged := make([]byte, 0, len(piece)+len(carry))
+					merged = append(merged, piece...)
+					merged = append(merged, carry...)
+					carry = merged
+				} else {
+					carry = append(carry, piece...)
+				}
+				bufPos = 0
+				break
+			}
+			// buf[idx+1:bufPos] is a complete line. If a carry exists, the
+			// carried bytes are the tail of this line (they occur later in the
+			// file), so the full line is piece + carry.
+			line := buf[idx+1 : bufPos]
+			if carry != nil {
+				merged := make([]byte, 0, len(carry)+len(line))
+				merged = append(merged, line...)
+				merged = append(merged, carry...)
+				emit(merged)
+				carry = nil
+			} else {
+				emit(line)
+			}
+			bufPos = idx
+		}
+
+		// Early exit: we have enough matches (they are the most recent).
+		if len(out) >= limit {
+			fs.Complete = true
+			break
+		}
+	}
+	if carry != nil && len(carry) > 0 && len(out) < limit {
+		emit(carry)
+		carry = nil
+	}
+	if haveMin {
+		s := minT.UTC().Format(time.RFC3339Nano)
+		fs.ScannedFrom = &s
+	}
+	if haveMax {
+		s := maxT.UTC().Format(time.RFC3339Nano)
+		fs.ScannedTo = &s
+	}
+	if pos <= 0 && !res.Truncated {
+		fs.Complete = true
+	}
+	// Scanning ran newest -> oldest; reverse so the caller sees chronological
+	// order with the most recent match last (the tail contract's expectation).
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
+// finalizeEntries caps tail/reverse result text and trims it to MaxResultChars,
+// keeping the most recent entries (oldest dropped once over budget).
+func finalizeEntries(res *Result, opts *Options) {
+	if opts.MaxLineChars > 0 {
+		for i := range res.Entries {
+			if t, on := opts.capText(res.Entries[i].Text); on {
+				res.Entries[i].Text = t
+				res.Entries[i].TextTruncated = true
+			}
+		}
+	}
+	if opts.MaxResultChars <= 0 || len(res.Entries) == 0 {
+		return
+	}
+	total := 0
+	for _, e := range res.Entries {
+		total += len(e.Text)
+	}
+	wasFull := len(res.Entries)
+	for total > opts.MaxResultChars && len(res.Entries) > 1 {
+		total -= len(res.Entries[0].Text)
+		res.Entries = res.Entries[1:]
+	}
+	if total > opts.MaxResultChars {
+		// Even a single capped line is over budget; keep the newest row anyway
+		// so the caller at least sees something rather than an empty payload.
+		res.Entries = res.Entries[len(res.Entries)-1:]
+	}
+	if len(res.Entries) < wasFull {
+		res.Truncated = true
+		res.charCapped = true
+		res.Reason = "result char limit (max_result_chars) exceeded"
+	}
+}
+
+// lastScannedTo returns the last per-file ScannedTo bound for summaries.
+func lastScannedTo(res *Result) string {
+	for i := len(res.PerFile) - 1; i >= 0; i-- {
+		if s := res.PerFile[i].ScannedTo; s != nil && *s != "" {
+			return *s
+		}
+	}
+	return ""
+}
+
+// maxScannedFrom returns the earliest scanned_from across files for summaries.
+func maxScannedFrom(res *Result) string {
+	var best string
+	for _, pf := range res.PerFile {
+		if pf.ScannedFrom == nil {
+			continue
+		}
+		if best == "" || *pf.ScannedFrom < best {
+			best = *pf.ScannedFrom
+		}
+	}
+	return best
+}
+
+// buildSummary fills res.Summary with a one-line human/agent-readable guide for
+// truncated or empty results, so the caller can decide whether to narrow the
+// window, raise a limit, or switch to a time-bounded query.
+func buildSummary(res *Result, opts *Options) bool {
+	if !res.Truncated && (len(res.PerFile) == 0 || res.TotalMatched > 0) {
+		return false
+	}
+	to := lastScannedTo(res)
+	switch {
+	case strings.Contains(res.Reason, "timeout"):
+		if to != "" {
+			res.Summary = fmt.Sprintf("query timed out; scanning stopped at %s — narrow the time window or raise LOGLENS_TIMEOUT_MS", to)
+		} else {
+			res.Summary = "query timed out before scanning completed — narrow the time window or raise LOGLENS_TIMEOUT_MS"
+		}
+	case strings.Contains(res.Reason, "byte budget"):
+		if to != "" {
+			res.Summary = fmt.Sprintf("LOGLENS byte budget used up; scanning stopped at %s — narrow the time window or raise LOGLENS_MAX_BYTES", to)
+		} else {
+			res.Summary = "byte budget used up before scanning completed — narrow the time window or raise LOGLENS_MAX_BYTES"
+		}
+	case strings.Contains(res.Reason, "max_result_chars"):
+		res.Summary = fmt.Sprintf("returned %d entries and hit max_result_chars — raise it or narrow the search (limit_lines)", len(res.Entries))
+	case strings.Contains(res.Reason, "line limit"):
+		res.Summary = fmt.Sprintf("returned %d entries and hit the line cap — raise limit_lines or narrow the search", len(res.Entries))
+	case !res.Truncated && res.TotalMatched == 0:
+		from := maxScannedFrom(res)
+		if from != "" && to != "" {
+			res.Summary = fmt.Sprintf("no matches in the scanned range (%s to %s); try other keywords, a wider window, or tail_backwards", from, to)
+		} else {
+			res.Summary = "no matches were found in the scanned range; try other keywords or a wider window"
+		}
+	default:
+		return false
+	}
+	return res.Summary != ""
 }
 
 func tailReason(err error) string {

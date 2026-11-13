@@ -60,7 +60,9 @@ Returns path (absolute), size, last-modified time and whether the file is gzip
 compressed. Set "path" to a directory to scope the listing (must be inside a
 LOGLENS_WHITELIST_DIRS entry); omit it to list every whitelisted directory.
 "glob" matches file names (e.g. "*.log", "*.gz", "access*"); use a "/" in the
-pattern to match relative paths recursively. Symlinks are not followed.`
+pattern to match relative paths recursively. "sort" accepts "name" (default,
+by path) or "time" (newest first by last-modified time — handy to find the most
+recent day's log). Symlinks are not followed.`
 
 func checkNonNegative(vals ...int) error {
 	for _, v := range vals {
@@ -80,6 +82,8 @@ func handleListLogFiles(cfg *security.Config) ToolHandler {
 		path, _ := argString(args, "path")
 		glob, _ := argString(args, "glob")
 		recursive, _ := argBool(args, "recursive")
+		sortParam, _ := argString(args, "sort")
+		sortByTime := sortParam == "time"
 
 		var roots []string
 		if path != "" {
@@ -106,10 +110,11 @@ func handleListLogFiles(cfg *security.Config) ToolHandler {
 		truncated := false
 		for _, root := range roots {
 			list, err := logreader.ListFiles(root, logreader.ListOptions{
-				Glob:      glob,
-				Recursive: recursive,
-				MaxFiles:  maxFiles(cfg),
-				Truncated: &truncated,
+				Glob:       glob,
+				Recursive:  recursive,
+				MaxFiles:   maxFiles(cfg),
+				Truncated:  &truncated,
+				SortByTime: sortByTime,
 			})
 			if err != nil {
 				return errResult(fmt.Errorf("list %q: %w", root, err)), nil
@@ -197,6 +202,14 @@ func buildQueryOptions(cfg *security.Config, files []string, args map[string]any
 	opts.IgnoreCase, _ = argBool(args, "ignore_case")
 	opts.UseRegex, _ = argBool(args, "use_regex")
 	opts.PerFileBudget, _ = argBool(args, "per_file_budget")
+	opts.TailBackwards, _ = argBool(args, "tail_backwards")
+
+	if n, ok := argInt(args, "max_result_chars"); ok {
+		opts.MaxResultChars = n
+	}
+	if n, ok := argInt(args, "max_line_chars"); ok {
+		opts.MaxLineChars = n
+	}
 
 	if n, ok := argInt(args, "context_before"); ok {
 		opts.ContextBefore = n
@@ -229,7 +242,11 @@ server's LOCAL timezone, so copy the format the log files themselves use
 use the same flavor for start_time and end_time.
 If time bounds are omitted this returns the most recent lines (tail); with
 keywords it returns the most recent lines matching them (great for "last call
-to /api/foo"). With time bounds, the query seeks to the window start instead of
+to /api/foo"). Set "tail_backwards": true to reverse-scan the whole file from
+its end instead of only the last LOGLENS_MAX_BYTES window, so the latest match
+is found even when it sits in the middle of a large file; the same byte budget
+applies, and a truncated result's per_file notes where scanning stopped. With
+time bounds, the query seeks to the window start instead of
 reading the whole file, so windows in the middle/end of very large logs are
 reachable within the byte budget.
 "keywords" (array or single string) must ALL appear in a line; every
@@ -241,7 +258,11 @@ truncated result shows where scanning stopped; when a plain file is seeked
 (seek_offset > 0), entry "line" is the line's offset from that seek point, not
 an absolute file line. If truncated with reason "line limit reached", raise
 limit_lines or shrink the window; if reason is "byte budget exceeded", narrow
-the time window (or raise LOGLENS_MAX_BYTES server-side). For a time bounded
+the time window (or raise LOGLENS_MAX_BYTES server-side); if reason mentions
+"max_result_chars", raise max_result_chars or narrow the search. "max_line_chars"
+(n) caps any single returned line's text (overlong lines are cut and flagged
+text_truncated) so one huge line cannot blow up the response. A "summary" field
+on truncated or empty results suggests what to change. For a time bounded
 query, lines with no parseable timestamp are skipped and counted in
 "unparsed_lines".`
 
@@ -291,16 +312,22 @@ line (AND); regex mode via use_regex:true. Optional start_time/end_time window;
 exclude_keywords removes matching lines; ignore_case and context_before/after
 behave like get_log_slice. Set "per_file_budget": true to give each file its
 own LOGLENS_MAX_BYTES budget instead of sharing one across files (so one
-oversized file does not starve the others). Timestamps use the same semantics
+oversized file does not starve the others). Set "tail_backwards": true to
+reverse-scan the newest file from its end and return the latest matches — the
+tool for "most recent call to X" when the event may sit in the middle of a big
+log; the byte budget bounds how far back the scan goes (a truncated result's
+per_file shows the coverage). Timestamps use the same semantics
 as get_log_slice (no-zone = server local time). Results are ordered
 chronologically when a time window is given. Without time bounds the (possibly
 multiple) files are scanned whole; give a start_time so the query seeks toward
 the window and stays within the byte budget on large files. The response's
 "per_file" array reports each scanned file's coverage (bytes read/total,
 scan start offset, first/last timestamp, completion) so a truncated result
-shows where scanning stopped. Bounded by LOGLENS_MAX_LINES,
-LOGLENS_MAX_BYTES and LOGLENS_TIMEOUT_MS; when a bound trips, "truncated" is
-set with the reason.`
+shows where scanning stopped. "max_result_chars" caps total returned text and
+"max_line_chars" caps a single line (cut lines flagged text_truncated); a
+"summary" field on truncated or empty results suggests what to change. Bounded
+by LOGLENS_MAX_LINES, LOGLENS_MAX_BYTES and LOGLENS_TIMEOUT_MS; when a bound
+trips, "truncated" is set with the reason.`
 
 func handleSearchLogs(cfg *security.Config, now func() time.Time) ToolHandler {
 	return func(ctx context.Context, req *sdk.CallToolRequest) (*sdk.CallToolResult, error) {

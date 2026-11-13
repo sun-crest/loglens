@@ -166,6 +166,33 @@ func TestListLogFiles(t *testing.T) {
 	}
 }
 
+// TestListLogFilesSortTime verifies the "sort": "time" parameter of
+// list_log_files: newest modified file must come first.
+func TestListLogFilesSortTime(t *testing.T) {
+	s, _, dir := newTestServer(t)
+	cs := connect(t, s)
+	// Give app.log a mtime well after the other fixtures (which were created
+	// moments ago), so it is unambiguously the newest.
+	future := time.Now().Add(2 * time.Minute)
+	if err := os.Chtimes(filepath.Join(dir, "app.log"), future, future); err != nil {
+		t.Fatal(err)
+	}
+	out, isErr := call(t, cs, "list_log_files", map[string]any{
+		"path": dir, "recursive": true, "sort": "time",
+	})
+	if isErr {
+		t.Fatalf("list_log_files errored: %v", out["_error"])
+	}
+	files, ok := out["files"].([]any)
+	if !ok || len(files) == 0 {
+		t.Fatalf("files = %v", out)
+	}
+	first := filepath.Base(files[0].(map[string]any)["path"].(string))
+	if first != "app.log" {
+		t.Errorf("newest file should be app.log, got %q", first)
+	}
+}
+
 // TestListLogFilesMaxFilesCap verifies the list cap is itself link: listing is
 // cut at MaxFiles (independent of MaxLines) and the response reports truncated.
 func TestListLogFilesMaxFilesCap(t *testing.T) {
@@ -294,6 +321,37 @@ func TestSearchLogsExcludeAndIgnoreCase(t *testing.T) {
 	}
 	if out["total_matched"].(float64) != 1 {
 		t.Errorf("single keyword matched = %v", out["total_matched"])
+	}
+}
+
+// TestSearchLogsTailBackwards drives search_logs + tail_backwards through the
+// MCP layer: it must return the latest keyword match without a time window even
+// though search_logs normally forces a whole-file scan (FullScan).
+func TestSearchLogsTailBackwards(t *testing.T) {
+	s, _, dir := newTestServer(t)
+	cs := connect(t, s)
+
+	out, isErr := call(t, cs, "search_logs", map[string]any{
+		"files":          []any{filepath.Join(dir, "api.log")},
+		"keywords":       []any{"request"},
+		"tail_backwards": true,
+		"limit_lines":    1,
+	})
+	if isErr {
+		t.Fatalf("errored: %v", out["_error"])
+	}
+	if res, ok := out["entries"].([]any); ok {
+		if len(res) != 1 {
+			t.Fatalf("entries = %d, want 1 (latest request hit)", len(res))
+		}
+		last := res[0].(map[string]any)["text"].(string)
+		// Newest line matching "request" is the 12:00:03 ERROR row (id=a01).
+		if !strings.Contains(last, "12:00:03") {
+			t.Errorf("latest request hit should be the 12:00:03 row, got %q", last)
+		}
+	}
+	if out["truncated"].(bool) {
+		t.Errorf("unexpected truncated: %v", out["reason"])
 	}
 }
 

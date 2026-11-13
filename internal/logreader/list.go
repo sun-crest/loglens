@@ -19,11 +19,12 @@ type FileInfo struct {
 
 // ListOptions controls file discovery.
 type ListOptions struct {
-	Root      string // absolute, already-whitelisted directory
-	Glob      string // filepath.Match pattern; with '/' matches the path relative to Root
-	Recursive bool
-	MaxFiles  int  // 0 = unlimited
-	Truncated *bool // if non-nil, set to true when MaxFiles cut the walk short
+	Root       string // absolute, already-whitelisted directory
+	Glob       string // filepath.Match pattern; with '/' matches the path relative to Root
+	Recursive  bool
+	MaxFiles   int   // 0 = unlimited
+	Truncated  *bool // if non-nil, set to true when MaxFiles cut the walk short
+	SortByTime bool  // sort newest-first by modification time (default: by path)
 }
 
 // ListFiles walks Root and returns regular files matching options, sorted by
@@ -86,7 +87,15 @@ func ListFiles(root string, opts ListOptions) ([]FileInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("walk %s: %w", root, err)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	sort.Slice(out, func(i, j int) bool {
+		if opts.SortByTime {
+			if out[i].ModTime != out[j].ModTime {
+				return out[i].ModTime > out[j].ModTime
+			}
+			return out[i].Path < out[j].Path
+		}
+		return out[i].Path < out[j].Path
+	})
 	return out, nil
 }
 
