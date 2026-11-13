@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// writeConf writes a loglens.toml into root/config for the given root.
-func writeConf(t *testing.T, root, body string) {
+// writeConfig writes a loglens.toml into root/config for the given root.
+func writeConfig(t *testing.T, root, body string) {
 	t.Helper()
 	dir := filepath.Join(root, "config")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -56,42 +56,42 @@ func TestResolveRootEnvWithoutFlag(t *testing.T) {
 	}
 }
 
-// TestLoadConfOverridesEnv: a conf value beats the environment value.
-func TestLoadConfOverridesEnv(t *testing.T) {
+// TestLoadConfigOverridesEnv: a config value beats the environment value.
+func TestLoadConfigOverridesEnv(t *testing.T) {
 	t.Setenv("LOGLENS_MAX_LINES", "100")
 	t.Setenv("LOGLENS_WHITELIST_DIRS", "/tmp")
 	root := t.TempDir()
-	writeConf(t, root, "[limits]\nmax_lines = 777\n")
+	writeConfig(t, root, "[limits]\nmax_lines = 777\n")
 
 	set, err := Load(Options{Root: root})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := set.Config.Limits.MaxLines; got != 777 {
-		t.Fatalf("conf should override env, got %d", got)
+		t.Fatalf("config should override env, got %d", got)
 	}
 	if got := set.Config.Dirs[0]; got != "/tmp" {
-		t.Fatalf("whitelist env entry should survive when conf omits dirs, got %v", set.Config.Dirs)
+		t.Fatalf("whitelist env entry should survive when config omits dirs, got %v", set.Config.Dirs)
 	}
 }
 
-// TestLoadEnvWhenConfOmitsKey: an absent conf key falls back to env.
-func TestLoadEnvWhenConfOmitsKey(t *testing.T) {
+// TestLoadEnvWhenConfigOmitsKey: an absent config key falls back to env.
+func TestLoadEnvWhenConfigOmitsKey(t *testing.T) {
 	t.Setenv("LOGLENS_MAX_LINES", "100")
 	t.Setenv("LOGLENS_WHITELIST_DIRS", "/tmp")
 	root := t.TempDir()
-	writeConf(t, root, "[lim]\n") // no valid key, only an unrelated table
+	writeConfig(t, root, "[lim]\n") // no valid key, only an unrelated table
 
 	set, err := Load(Options{Root: root})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := set.Config.Limits.MaxLines; got != 100 {
-		t.Fatalf("env should apply when conf omits the key, got %d", got)
+		t.Fatalf("env should apply when config omits the key, got %d", got)
 	}
 }
 
-// TestLoadWorkspaceDefaultDirs: without conf and env, a workspace defaults to
+// TestLoadWorkspaceDefaultDirs: without config and env, a workspace defaults to
 // reading from <root>/logs.
 func TestLoadWorkspaceDefaultDirs(t *testing.T) {
 	t.Setenv("LOGLENS_WHITELIST_DIRS", "")
@@ -106,11 +106,11 @@ func TestLoadWorkspaceDefaultDirs(t *testing.T) {
 	}
 }
 
-// TestLoadConfDirsRelative: conf entries resolve relative to the root.
-func TestLoadConfDirsRelative(t *testing.T) {
+// TestLoadConfigDirsRelative: config entries resolve relative to the root.
+func TestLoadConfigDirsRelative(t *testing.T) {
 	t.Setenv("LOGLENS_WHITELIST_DIRS", "/elsewhere")
 	root := t.TempDir()
-	writeConf(t, root, "[dirs]\nallow = [\"logs\", \"/var/log\"]\n")
+	writeConfig(t, root, "[dirs]\nallow = [\"logs\", \"/var/log\"]\n")
 
 	set, err := Load(Options{Root: root})
 	if err != nil {
@@ -118,11 +118,11 @@ func TestLoadConfDirsRelative(t *testing.T) {
 	}
 	want := []string{filepath.Join(root, "logs"), "/var/log"}
 	if len(set.Config.Dirs) != 2 || set.Config.Dirs[0] != want[0] || set.Config.Dirs[1] != want[1] {
-		t.Fatalf("conf dirs mismatch, got %v want %v", set.Config.Dirs, want)
+		t.Fatalf("config dirs mismatch, got %v want %v", set.Config.Dirs, want)
 	}
 }
 
-// TestLoadDefaults: no env, no conf -> built-in defaults, classic mode.
+// TestLoadDefaults: no env, no config -> built-in defaults, classic mode.
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("LOGLENS_WHITELIST_DIRS", "")
 	t.Setenv("LOGLENS_MAX_LINES", "")
@@ -145,23 +145,23 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
-// TestLoadServeDefaultsFromConf: addr/token come from the conf file.
-func TestLoadServeDefaultsFromConf(t *testing.T) {
+// TestLoadServeDefaultsFromConfig: addr/token come from the config file.
+func TestLoadServeDefaultsFromConfig(t *testing.T) {
 	root := t.TempDir()
-	writeConf(t, root, "[serve]\naddr = \"0.0.0.0:9999\"\ntoken = \"sekret\"\n")
+	writeConfig(t, root, "[serve]\naddr = \"0.0.0.0:9999\"\ntoken = \"sekret\"\n")
 	set, err := Load(Options{Root: root})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if set.ServeAddr != "0.0.0.0:9999" || set.ServeToken != "sekret" {
-		t.Fatalf("serve defaults from conf, got addr=%q token=%q", set.ServeAddr, set.ServeToken)
+		t.Fatalf("serve defaults from config, got addr=%q token=%q", set.ServeAddr, set.ServeToken)
 	}
 }
 
 // TestLoadLogFileRelative: log.file resolves against the root.
 func TestLoadLogFileRelative(t *testing.T) {
 	root := t.TempDir()
-	writeConf(t, root, "[log]\nfile = \"logs/loglens.log\"\nmax_size_mb = 5\n")
+	writeConfig(t, root, "[log]\nfile = \"logs/loglens.log\"\nmax_size_mb = 5\n")
 	set, err := Load(Options{Root: root})
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +176,7 @@ func TestLoadLogFileRelative(t *testing.T) {
 
 func TestLoadInvalidLimits(t *testing.T) {
 	root := t.TempDir()
-	writeConf(t, root, "[limits]\nmax_lines = 0\n")
+	writeConfig(t, root, "[limits]\nmax_lines = 0\n")
 	if _, err := Load(Options{Root: root}); err == nil {
 		t.Fatal("max_lines = 0 should be rejected")
 	}
@@ -184,25 +184,25 @@ func TestLoadInvalidLimits(t *testing.T) {
 
 func TestLoadInvalidTOML(t *testing.T) {
 	root := t.TempDir()
-	writeConf(t, root, "[limits\nmax_lines = nope")
+	writeConfig(t, root, "[limits\nmax_lines = nope")
 	if _, err := Load(Options{Root: root}); err == nil {
 		t.Fatal("malformed TOML should be rejected")
 	}
 }
 
-// TestLoadClassicModeIgnoresConf: with no root there is no conf lookup, so
+// TestLoadClassicModeIgnoresConfig: with no root there is no config lookup, so
 // configuration is purely from env.
-func TestLoadClassicModeIgnoresConf(t *testing.T) {
+func TestLoadClassicModeIgnoresConfig(t *testing.T) {
 	t.Setenv("LOGLENS_WHITELIST_DIRS", "/tmp")
 	wd := t.TempDir()
-	writeConf(t, wd, "[limits]\nmax_lines = 42\n")
-	t.Chdir(wd) // the conf tree exists, but classic mode must not read it
+	writeConfig(t, wd, "[limits]\nmax_lines = 42\n")
+	t.Chdir(wd) // the config tree exists, but classic mode must not read it
 	set, err := Load(Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if set.Config.Limits.MaxLines != 2000 {
-		t.Fatalf("classic mode must ignore a stray conf tree, got %d", set.Config.Limits.MaxLines)
+		t.Fatalf("classic mode must ignore a stray config tree, got %d", set.Config.Limits.MaxLines)
 	}
 	if len(set.Config.Dirs) != 1 || set.Config.Dirs[0] != "/tmp" {
 		t.Fatalf("classic mode dirs from env, got %v", set.Config.Dirs)

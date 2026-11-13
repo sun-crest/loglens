@@ -86,10 +86,10 @@ Security configuration (environment variables):
   LOGLENS_TIMEOUT_MS       Max wall-clock time per query (ms)      (default 15000)
 
 serve flags:
-  --root   Workspace root (also LOGLENS_ROOT, or inferred from bin/ + conf/)
+  --root   Workspace root (also LOGLENS_ROOT, or inferred from bin/ + config/)
   --addr   Listen address (default from config/loglens.toml, else 127.0.0.1:8787;
            keep on loopback and expose via SSH tunnel)
-  --token  Optional bearer token; overrides the conf file
+  --token  Optional bearer token; overrides the config file
 
 Examples:
   <root>/bin/loglens serve --addr 127.0.0.1:8787   # config from <root>/config/loglens.toml
@@ -97,7 +97,7 @@ Examples:
 `)
 }
 
-// loadSetOrExit resolves the full configuration (workspace root, conf file,
+// loadSetOrExit resolves the full configuration (workspace root, config file,
 // environment variables) and exits with a clear message when invalid.
 func loadSetOrExit(rootFlag string) *config.Set {
 	set, err := config.Load(config.Options{Root: rootFlag})
@@ -163,8 +163,8 @@ func runServe() error {
 	}
 	warnMissingDirs(set.Config)
 
-	// Resolved defaults come from conf/env; only *explicitly passed* flags
-	// override them (a default-valued flag must not clobber the conf file).
+	// Resolved defaults come from config/env; only *explicitly passed* flags
+	// override them (a default-valued flag must not clobber the config file).
 	addrVal, tokenVal := set.ServeAddr, set.ServeToken
 	setFlags := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })

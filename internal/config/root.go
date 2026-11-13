@@ -1,6 +1,6 @@
 // Package config resolves LogLens runtime configuration from three sources:
-// explicit CLI flags, an optional workspace conf file, and environment
-// variables. Precedence for any given key is flag > conf file > env > default.
+// explicit CLI flags, an optional workspace config file, and environment
+// variables. Precedence for any given key is flag > config file > env > default.
 //
 // The workspace ("directory tree") layout is the primary deployment shape:
 //

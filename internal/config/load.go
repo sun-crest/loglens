@@ -11,10 +11,10 @@ import (
 )
 
 const (
-	// confFileName is the default configuration file inside the workspace.
-	confFileName = "loglens.toml"
+	// configFileName is the default configuration file inside the workspace.
+	configFileName = "loglens.toml"
 
-	// DefaultServeAddr is used when neither the conf file nor a flag sets it.
+	// DefaultServeAddr is used when neither the config file nor a flag sets it.
 	DefaultServeAddr = "127.0.0.1:8787"
 
 	// DefaultLogMaxBytes is the default runtime-log rotation threshold (10 MiB).
@@ -36,7 +36,7 @@ type Set struct {
 	Config *security.Config
 
 	// ServeAddr / ServeToken are the effective `serve` defaults after the
-	// conf file has been applied (explicit flags still override in main).
+	// config file has been applied (explicit flags still override in main).
 	ServeAddr  string
 	ServeToken string
 
@@ -46,8 +46,8 @@ type Set struct {
 }
 
 // Load resolves the effective configuration. Precedence for every key:
-// explicit CLI flag (via Options / main) > conf file > env > built-in default.
-// With no workspace root and no conf file the result is byte-for-byte what the
+// explicit CLI flag (via Options / main) > config file > env > built-in default.
+// With no workspace root and no config file the result is byte-for-byte what the
 // pre-workspace environment-only behaviour produced.
 func Load(opts Options) (*Set, error) {
 	// Base layer from env (which applies the built-in defaults).
@@ -63,15 +63,15 @@ func Load(opts Options) (*Set, error) {
 		LogMaxBytes: DefaultLogMaxBytes,
 	}
 
-	// Optional conf file; keys present in it override env.
-	var cf confFile
-	if p := confPath(set.Root); p != "" {
+	// Optional config file; keys present in it override env.
+	var cf configFile
+	if p := configPath(set.Root); p != "" {
 		if _, err := toml.DecodeFile(p, &cf); err != nil {
 			return nil, fmt.Errorf("%s: %w", p, err)
 		}
 	}
 
-	// Dirs: conf > env > (workspace default: <root>/logs) / none.
+	// Dirs: config > env > (workspace default: <root>/logs) / none.
 	switch {
 	case cf.Dirs != nil && cf.Dirs.Allow != nil:
 		cfg.Dirs = expandDirs(*cf.Dirs.Allow, set.Root)
@@ -79,7 +79,7 @@ func Load(opts Options) (*Set, error) {
 		cfg.Dirs = []string{filepath.Join(set.Root, "logs")}
 	}
 
-	// Limits: conf overrides the env/default layer.
+	// Limits: config overrides the env/default layer.
 	if cf.Limits != nil {
 		if v := cf.Limits.MaxLines; v != nil {
 			if *v <= 0 {
@@ -107,7 +107,7 @@ func Load(opts Options) (*Set, error) {
 		}
 	}
 
-	// Serve defaults from conf; main only applies explicit flags on top.
+	// Serve defaults from config; main only applies explicit flags on top.
 	if cf.Serve != nil {
 		if cf.Serve.Addr != nil {
 			set.ServeAddr = *cf.Serve.Addr
@@ -117,7 +117,7 @@ func Load(opts Options) (*Set, error) {
 		}
 	}
 
-	// Runtime log: conf > stderr (default is no file).
+	// Runtime log: config > stderr (default is no file).
 	if cf.Log != nil && cf.Log.File != nil {
 		set.LogFile = resolveRel(*cf.Log.File, set.Root)
 		if cf.Log.MaxSizeMB != nil && *cf.Log.MaxSizeMB > 0 {
@@ -128,13 +128,13 @@ func Load(opts Options) (*Set, error) {
 	return set, nil
 }
 
-// confPath returns the workspace config file path, or "" when there is no
+// configPath returns the workspace config file path, or "" when there is no
 // workspace or the file does not exist.
-func confPath(root string) string {
+func configPath(root string) string {
 	if root == "" {
 		return ""
 	}
-	p := filepath.Join(root, "config", confFileName)
+	p := filepath.Join(root, "config", configFileName)
 	if _, err := os.Stat(p); err != nil {
 		return ""
 	}
