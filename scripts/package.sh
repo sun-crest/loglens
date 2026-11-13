@@ -5,8 +5,9 @@
 #   ./scripts/package.sh            # 版本号从 cmd/loglens/main.go 唯一读取
 #
 # 不接受版本参数：版本号唯一真相源是 cmd/loglens/main.go 的 const version，
-# 以保证包名与二进制内 "loglens version" 永远一致（发版流程：先 bump 该常量，
-# 再 tag，再打包）。CI 复用同一脚本，一致性由该流程保证。
+# 以保证包名与二进制内 "loglens version" 永远一致。本脚本接受任意合法 semver
+# （含 -dev / -rc 等 prerelease）：开发期用它打自包含包做本地冒烟或部署测试机
+# 验证。对外发布的把关在 scripts/release.sh（只放行纯版本号），两个脚本职责分开。
 #   # GitHub Actions 片段
 #   - run: ./scripts/package.sh
 #   - run: gh release create "${GITHUB_REF_NAME}" $(ls dist/*.tar.gz dist/*.sha256)
@@ -24,8 +25,8 @@ if [ $# -gt 0 ]; then
   exit 1
 fi
 version="$(sed -n 's/^const version = "\(.*\)"$/\1/p' cmd/loglens/main.go)"
-if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "error: 无法从 cmd/loglens/main.go 确定版本号 (当前='${version}')" >&2
+if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+  echo "error: 无法从 cmd/loglens/main.go 确定版本号 (当前='${version}')，期望形如 x.y.z 或 x.y.z-dev" >&2
   exit 1
 fi
 

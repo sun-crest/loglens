@@ -61,3 +61,4 @@ LogLens 是面向**开发者与 AI Agent** 的单机日志工作台：内置原�
 
 - module 路径：`github.com/sun-crest/loglens`
 - 远端仓库：`gh-sun:sun-crest/loglens`（上游跟踪 `origin/master`）
+- 版本号与发版流程：`docs/RELEASING.md`

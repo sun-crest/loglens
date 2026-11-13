@@ -16,33 +16,13 @@ Slogan：*Logs observed by humans and analyzed by agents.*
 
 ## 快速开始
 
-### 构建与测试
+### 开发与测试
 
-```bash
-CGO_ENABLED=0 go build ./cmd/loglens   # 静态编译:产物不依赖系统 glibc,可拷到任意 Linux(含旧版发行版)
-go test ./...                   # 单元 + 集成测试（内部通过官方 SDK 客户端走完整 MCP 握手，stdio 与 HTTP 两套传输）
-go test -race ./...             # 竞态检测
+在源码上构建、单元/集成测试、serve 冒烟，见 `docs/DEVELOPMENT.md`。要把实例部署到日志所在主机的构建产物，见下方「远程部署」。
 
-# serve 快速冒烟：起一个需要 token 的本地 MCP HTTP 端点
-LOGLENS_WHITELIST_DIRS=/tmp/logs loglens serve --addr 127.0.0.1:8787 --token dev
-curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer dev' \
-  -H 'Content-Type: application/json' \
-  -X POST http://127.0.0.1:8787/mcp \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
-```
+### 版本与产物命名
 
-### 发版打包
-
-版本号**唯一真相源**是 cmd/loglens/main.go 的 `const version`——发版流程是**先 bump 该常量 → 打 tag → 再打包**，产物名与二进制内的 `loglens version` 永远一致。一条命令产出自包含发行包：
-
-```bash
-./scripts/package.sh
-# 产出 dist/loglens-<版本>-linux-amd64.tar.gz 及其 .sha256
-# 脚本自校验：解包后二进制 version 必须与包名一致，否则报错退出
-# （脚本不接受版本参数，防包名与二进制版本脱节）
-```
-
-包内容即目录树工作区（`bin/` + `config/loglens.toml.example` + 空 `logs/`），目标机解包 `./bin/loglens serve` 直接可用。`scripts/package.sh` 纯函数化（无交互、无硬编码目录），将来接 GitHub Actions / goreleaser 时作为构建打包步骤直接复用。
+版本号**唯一真相源**是 cmd/loglens/main.go 的 `const version`——`loglens version`、MCP `Implementation.Version`、发行包名三者永远一致。产物形如 `loglens-<版本>-linux-amd64.tar.gz`（开发期带 `-dev` 后缀，如 `loglens-0.2.0-dev-linux-amd64.tar.gz`）。打自包含包：`./scripts/package.sh`。版本管理、bump 推进与一键发版流程（`./scripts/release.sh`）见 `docs/RELEASING.md`。
 
 ### MCP stdio（本地）
 
