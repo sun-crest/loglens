@@ -1,9 +1,13 @@
 # 编译产物
 /loglens
 /bin/
+/dist/
 *.exe
 *.test
 *.out
+
+# 工作区实例配置（模板 conf/loglens.conf.example 会被跟踪）
+/conf/loglens.conf
 
 # IDE / 编辑器
 .vscode/

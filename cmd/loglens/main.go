@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sun-crest/loglens/internal/config"
+	"github.com/sun-crest/loglens/internal/logfile"
 	"github.com/sun-crest/loglens/internal/mcp"
 	"github.com/sun-crest/loglens/internal/security"
 	"github.com/sun-crest/loglens/internal/tui"
@@ -63,56 +65,90 @@ func usage() {
 	fmt.Fprint(os.Stderr, `LogLens `, version, ` - a local log workspace with a native MCP server for Claude Code.
 
 Usage:
-  loglens mcp       Run the MCP stdio server (for Claude Code; default command)
-  loglens serve     Run the MCP Streamable HTTP server (remote access)
-  loglens tui       Interactive TUI (not implemented yet)
-  loglens version   Print the version
-  loglens help      Show this help
+  loglens mcp [--root <dir>]      Run the MCP stdio server (for Claude Code; default command)
+  loglens serve [--root <dir>]    Run the MCP Streamable HTTP server (remote access)
+             [--addr <host:port>] [--token <token>]
+  loglens tui [--root <dir>]      Interactive TUI (not implemented yet)
+  loglens version                 Print the version
+  loglens help                    Show this help
+
+Workspace (directory-tree) deployment is preferred:
+  <root>/bin/loglens         run every command via this path; the root is
+  <root>/conf/loglens.conf   detected from the binary location, and the conf
+  <root>/logs/               file supplies dirs/limits/serve/log defaults.
+Move the whole <root> directory to another host - nothing to reconfigure.
+Without a workspace, configuration falls back to environment variables:
 
 Security configuration (environment variables):
-  LOGLENS_WHITELIST_DIRS   Comma-separated allowed log directories (required)
+  LOGLENS_WHITELIST_DIRS   Comma-separated allowed log directories
   LOGLENS_MAX_LINES        Max lines returned per query            (default 2000)
   LOGLENS_MAX_BYTES        Max bytes read from disk per query      (default 10485760)
   LOGLENS_TIMEOUT_MS       Max wall-clock time per query (ms)      (default 15000)
 
 serve flags:
-  --addr   Listen address (default 127.0.0.1:8787; keep on loopback and expose via SSH tunnel)
-  --token  Optional bearer token; requires Authorization: Bearer <token> on every request
+  --root   Workspace root (also LOGLENS_ROOT, or inferred from bin/ + conf/)
+  --addr   Listen address (default from conf/loglens.conf, else 127.0.0.1:8787;
+           keep on loopback and expose via SSH tunnel)
+  --token  Optional bearer token; overrides the conf file
 
-Example:
+Examples:
+  <root>/bin/loglens serve --addr 127.0.0.1:8787   # config from <root>/conf/loglens.conf
   LOGLENS_WHITELIST_DIRS=/var/log,/opt/service/logs loglens mcp
-  LOGLENS_WHITELIST_DIRS=/var/log,/opt/service/logs loglens serve --addr 127.0.0.1:8787 --token secret
 `)
 }
 
-func loadConfigOrExit() *security.Config {
-	cfg, err := security.LoadConfigFromEnv()
+// loadSetOrExit resolves the full configuration (workspace root, conf file,
+// environment variables) and exits with a clear message when invalid.
+func loadSetOrExit(rootFlag string) *config.Set {
+	set, err := config.Load(config.Options{Root: rootFlag})
 	if err != nil {
 		log.Fatalf("loglens: invalid configuration: %v", err)
 	}
-	if !cfg.HasDirs() {
-		log.Print("loglens: warning: LOGLENS_WHITELIST_DIRS is empty; all file access will be denied " +
-			"(set it to the directories you want LogLens to manage)")
+	if !set.Config.HasDirs() {
+		log.Print("loglens: warning: no log directories configured; all file access will be denied " +
+			"(set conf/loglens.conf dirs.allow or LOGLENS_WHITELIST_DIRS)")
 	}
-	return cfg
+	return set
+}
+
+// applyRuntimeLog redirects the runtime log to a file when a workspace
+// log.file is configured. It returns a closer for the file, or nil when the
+// process keeps logging to stderr.
+func applyRuntimeLog(set *config.Set) *logfile.Writer {
+	if set.LogFile == "" {
+		return nil
+	}
+	w, err := logfile.New(set.LogFile, set.LogMaxBytes)
+	if err != nil {
+		log.Printf("loglens: warning: cannot open runtime log %s: %v (falling back to stderr)", set.LogFile, err)
+		return nil
+	}
+	log.SetOutput(w)
+	return w
 }
 
 func runMCP() error {
-	cfg := loadConfigOrExit()
-	if missing := missingWhitelistDirs(cfg); len(missing) > 0 {
-		log.Printf("loglens: warning: whitelist directories do not exist (yet): %v", missing)
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	root := fs.String("root", "", "workspace root (also read from LOGLENS_ROOT or inferred from the binary location)")
+	if err := fs.Parse(os.Args[2:]); err != nil {
+		return err
 	}
-	return mcp.Run(context.Background(), cfg, version)
+	if fs.NArg() > 0 {
+		return fmt.Errorf("mcp: unexpected argument %q", fs.Arg(0))
+	}
+
+	set := loadSetOrExit(*root)
+	warnMissingDirs(set.Config)
+	return mcp.Run(context.Background(), set.Config, version)
 }
 
 // runServe exposes the MCP server over Streamable HTTP, so a local Claude Code
 // can reach logs on a remote host. Defaults to loopback only; cross-machine
-// access should go through an SSH tunnel, with --token enabled.
+// access should go through an SSH tunnel, with a token configured.
 func runServe() error {
-	cfg := loadConfigOrExit()
-
-	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	addr := fs.String("addr", "127.0.0.1:8787", "listen address (keep on loopback; expose via SSH tunnel)")
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	root := fs.String("root", "", "workspace root (directory-tree layout)")
+	addr := fs.String("addr", "", "listen address (default from conf/loglens.conf, else 127.0.0.1:8787)")
 	token := fs.String("token", "", "require Authorization: Bearer <token> on every request")
 	if err := fs.Parse(os.Args[2:]); err != nil {
 		return err
@@ -120,16 +156,32 @@ func runServe() error {
 	if fs.NArg() > 0 {
 		return fmt.Errorf("serve: unexpected argument %q", fs.Arg(0))
 	}
-	if missing := missingWhitelistDirs(cfg); len(missing) > 0 {
-		log.Printf("loglens: warning: whitelist directories do not exist (yet): %v", missing)
+
+	set := loadSetOrExit(*root)
+	if rw := applyRuntimeLog(set); rw != nil {
+		defer rw.Close()
 	}
-	if *token == "" {
-		log.Print("loglens: serve: no --token set; bind stays on loopback — do not publish the port without a token")
+	warnMissingDirs(set.Config)
+
+	// Resolved defaults come from conf/env; only *explicitly passed* flags
+	// override them (a default-valued flag must not clobber the conf file).
+	addrVal, tokenVal := set.ServeAddr, set.ServeToken
+	setFlags := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+	if setFlags["addr"] {
+		addrVal = *addr
+	}
+	if setFlags["token"] {
+		tokenVal = *token
 	}
 
-	handler := mcp.NewHTTPHandler(cfg, version, mcp.HTTPOptions{Token: *token, Path: "/mcp"})
+	if tokenVal == "" {
+		log.Print("loglens: serve: no token configured; bind stays on loopback - do not publish the port without a token")
+	}
+
+	handler := mcp.NewHTTPHandler(set.Config, version, mcp.HTTPOptions{Token: tokenVal, Path: "/mcp"})
 	srv := &http.Server{
-		Addr:              *addr,
+		Addr:              addrVal,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
@@ -137,7 +189,7 @@ func runServe() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("loglens serve: Streamable MCP listening on http://%s/mcp", *addr)
+	log.Printf("loglens serve: Streamable MCP listening on http://%s/mcp", addrVal)
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
 
@@ -156,8 +208,23 @@ func runServe() error {
 }
 
 func runTUI() error {
-	cfg := loadConfigOrExit()
-	return tui.Run(context.Background(), cfg)
+	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
+	root := fs.String("root", "", "workspace root (directory-tree layout)")
+	if err := fs.Parse(os.Args[2:]); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("tui: unexpected argument %q", fs.Arg(0))
+	}
+
+	set := loadSetOrExit(*root)
+	return tui.Run(context.Background(), set.Config)
+}
+
+func warnMissingDirs(cfg *security.Config) {
+	if missing := missingWhitelistDirs(cfg); len(missing) > 0 {
+		log.Printf("loglens: warning: whitelist directories do not exist (yet): %v", missing)
+	}
 }
 
 func missingWhitelistDirs(cfg *security.Config) []string {
