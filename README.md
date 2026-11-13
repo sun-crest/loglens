@@ -31,6 +31,19 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer dev' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
 ```
 
+### 发版打包
+
+版本号**唯一真相源**是 cmd/loglens/main.go 的 `const version`——发版流程是**先 bump 该常量 → 打 tag → 再打包**，产物名与二进制内的 `loglens version` 永远一致。一条命令产出自包含发行包：
+
+```bash
+./scripts/package.sh
+# 产出 dist/loglens-<版本>-linux-amd64.tar.gz 及其 .sha256
+# 脚本自校验：解包后二进制 version 必须与包名一致，否则报错退出
+# （脚本不接受版本参数，防包名与二进制版本脱节）
+```
+
+包内容即目录树工作区（`bin/` + `config/loglens.toml.example` + 空 `logs/`），目标机解包 `./bin/loglens serve` 直接可用。`scripts/package.sh` 纯函数化（无交互、无硬编码目录），将来接 GitHub Actions / goreleaser 时作为构建打包步骤直接复用。
+
 ### MCP stdio（本地）
 
 ```bash
@@ -338,6 +351,8 @@ loglens/
 │   └── tui/                  # (占位)
 ├── config/
 │   └── loglens.toml.example   # 工作区配置模板（实例 config/loglens.toml 不入库）
+├── scripts/
+│   └── package.sh             # 发版打包：静态构建 + 目录树 tar.gz + checksum + 解包冒烟
 ├── docs/
 │   ├── REQUIREMENTS.md       # 需求与路线图（目标、非目标、里程碑）
 │   └── DESIGN.md             # 设计与实现（架构分层、关键技术决策）
