@@ -19,7 +19,7 @@ import (
 	"github.com/sun-crest/loglens/internal/tui"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func main() {
 	log.SetFlags(0) // plain messages; all diagnostics go to stderr (stdout is the MCP transport)
