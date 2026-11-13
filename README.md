@@ -291,5 +291,10 @@ loglens/
 │   └── DESIGN.md             # 设计与实现（架构分层、关键技术决策）
 ├── testdata/logs/            # 冒烟测试夹具（普通 + gz 轮转 + Java 格式）
 ├── go.mod / go.sum
+├── LICENSE              # MIT 开源协议
 └── README.md
 ```
+
+## License
+
+[MIT](LICENSE) © 2026 sun。保留版权与许可声明即可自由使用、修改、分发与商用；不附带任何担保。
