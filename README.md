@@ -3,13 +3,14 @@
 > A local log viewing & analysis workspace, native MCP server for Claude Code.
 > Not related to other projects named loglens. This one is built for human engineers and AI agents, with time-slice query, gz rotated log support, TUI and safe bounded query for MCP.
 
-LogLens 是面向开发者与 AI Agent 的本地日志工作台，内置原生 MCP 服务，让 Claude Code 可以安全、可控地检索、切片、分析日志。
+LogLens 是面向开发者与 AI Agent 的日志工作台，内置原生 MCP 服务。**主场景：Claude Code 在本机、日志在远程服务器**——把 LogLens 实例部署到日志所在主机，本机 Claude 就可以像查本地文件一样，安全地**搜索、切片、解析远程日志**。
 
 ✅ 核心特性
+- **本地 Claude · 远程日志（主场景）**：实例部署在日志所在主机，搜索 / 解析在服务器上完成、只回传结果，本机 Claude 经 SSH 隧道 / HTTP 访问（详见下方「远程部署」）
 - 时间范围切片查询（核心能力，区别于 tail / grep）
 - 原生支持普通日志、`.gz` 轮转日志（自动合并 `base.N[.gz]` 轮转组）
 - 内置安全限制：行数上限、字节上限、超时、日志目录白名单，防止 AI 裸读超大日志打满服务器
-- 两种运行模式：MCP（stdio 本地 / Streamable HTTP 远程）给 Claude Code 调用；TUI 人工排查（规划中，见路线图）
+- 两种消费方式：MCP（stdio 本地 / Streamable HTTP 远程）给 Claude Code 调用；TUI 人工排查（规划中，见路线图）
 
 Slogan：*Logs observed by humans and analyzed by agents.*
 
