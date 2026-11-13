@@ -74,7 +74,7 @@ Usage:
 
 Workspace (directory-tree) deployment is preferred:
   <root>/bin/loglens         run every command via this path; the root is
-  <root>/conf/loglens.conf   detected from the binary location, and the conf
+  <root>/config/loglens.toml   detected from the binary location, and the config
   <root>/logs/               file supplies dirs/limits/serve/log defaults.
 Move the whole <root> directory to another host - nothing to reconfigure.
 Without a workspace, configuration falls back to environment variables:
@@ -87,12 +87,12 @@ Security configuration (environment variables):
 
 serve flags:
   --root   Workspace root (also LOGLENS_ROOT, or inferred from bin/ + conf/)
-  --addr   Listen address (default from conf/loglens.conf, else 127.0.0.1:8787;
+  --addr   Listen address (default from config/loglens.toml, else 127.0.0.1:8787;
            keep on loopback and expose via SSH tunnel)
   --token  Optional bearer token; overrides the conf file
 
 Examples:
-  <root>/bin/loglens serve --addr 127.0.0.1:8787   # config from <root>/conf/loglens.conf
+  <root>/bin/loglens serve --addr 127.0.0.1:8787   # config from <root>/config/loglens.toml
   LOGLENS_WHITELIST_DIRS=/var/log,/opt/service/logs loglens mcp
 `)
 }
@@ -106,7 +106,7 @@ func loadSetOrExit(rootFlag string) *config.Set {
 	}
 	if !set.Config.HasDirs() {
 		log.Print("loglens: warning: no log directories configured; all file access will be denied " +
-			"(set conf/loglens.conf dirs.allow or LOGLENS_WHITELIST_DIRS)")
+			"(set config/loglens.toml dirs.allow or LOGLENS_WHITELIST_DIRS)")
 	}
 	return set
 }
@@ -148,7 +148,7 @@ func runMCP() error {
 func runServe() error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	root := fs.String("root", "", "workspace root (directory-tree layout)")
-	addr := fs.String("addr", "", "listen address (default from conf/loglens.conf, else 127.0.0.1:8787)")
+	addr := fs.String("addr", "", "listen address (default from config/loglens.toml, else 127.0.0.1:8787)")
 	token := fs.String("token", "", "require Authorization: Bearer <token> on every request")
 	if err := fs.Parse(os.Args[2:]); err != nil {
 		return err

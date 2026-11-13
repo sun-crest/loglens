@@ -51,12 +51,12 @@ LOGLENS_TIMEOUT_MS=15000 \
 
 ### 在远程主机启动 serve
 
-**目录树部署（推荐，无需 systemd / 环境变量）**：一个自包含工作区目录，配置集中在 `conf/loglens.conf`，整个目录拷走即迁移。
+**目录树部署（推荐，无需 systemd / 环境变量）**：一个自包含工作区目录，配置集中在 `config/loglens.toml`，整个目录拷走即迁移。
 
 ```text
 /srv/loglens/                  # 工作区根（可整体搬迁）
 ├── bin/loglens                # 静态二进制
-├── conf/loglens.conf          # 配置（由 conf/loglens.conf.example 拷贝）
+├── config/loglens.toml          # 配置（由 config/loglens.toml.example 拷贝）
 └── logs/                      # 观察日志默认白名单 + 可选运行日志
 ```
 
@@ -64,14 +64,14 @@ LOGLENS_TIMEOUT_MS=15000 \
 # 编译机构建，拷到目标机组成工作区
 CGO_ENABLED=0 go build ./cmd/loglens
 scp loglens user@your-server:/tmp/
-scp conf/loglens.conf.example user@your-server:/tmp/
-ssh user@your-server 'mkdir -p /srv/loglens/bin /srv/loglens/conf /srv/loglens/logs \
+scp config/loglens.toml.example user@your-server:/tmp/loglens.toml.example
+ssh user@your-server 'mkdir -p /srv/loglens/bin /srv/loglens/config /srv/loglens/logs \
   && mv /tmp/loglens /srv/loglens/bin/ \
-  && cp /tmp/loglens.conf /srv/loglens/conf/loglens.conf \
-  && vi /srv/loglens/conf/loglens.conf'
+  && cp /tmp/loglens.toml.example /srv/loglens/config/loglens.toml \
+  && vi /srv/loglens/config/loglens.toml'
 ```
 
-写入 `conf/loglens.conf`（关键项）：
+写入 `config/loglens.toml`（关键项）：
 
 ```toml
 [dirs]
@@ -86,7 +86,7 @@ file        = "logs/loglens.log" # 运行日志落盘（无需 journald），自
 max_size_mb = 10
 ```
 
-启动——root 自动从二进制位置识别（`<root>/bin/` 与 `conf/` 同存即推断），无需任何参数：
+启动——root 自动从二进制位置识别（`<root>/bin/` 与 `config/` 同存即推断），无需任何参数：
 
 ```bash
 /srv/loglens/bin/loglens serve
@@ -336,8 +336,8 @@ loglens/
 │   ├── mcp/                  # MCP server（官方 go-sdk）、工具定义、schema
 │   ├── security/             # 白名单、路径解析防穿越、限额、超时
 │   └── tui/                  # (占位)
-├── conf/
-│   └── loglens.conf.example  # 工作区配置模板（实例 conf/loglens.conf 不入库）
+├── config/
+│   └── loglens.toml.example   # 工作区配置模板（实例 config/loglens.toml 不入库）
 ├── docs/
 │   ├── REQUIREMENTS.md       # 需求与路线图（目标、非目标、里程碑）
 │   └── DESIGN.md             # 设计与实现（架构分层、关键技术决策）

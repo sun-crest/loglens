@@ -6,14 +6,14 @@ import (
 	"testing"
 )
 
-// writeConf writes a loglens.conf into root/conf for the given root.
+// writeConf writes a loglens.toml into root/config for the given root.
 func writeConf(t *testing.T, root, body string) {
 	t.Helper()
-	dir := filepath.Join(root, "conf")
+	dir := filepath.Join(root, "config")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	f := filepath.Join(dir, "loglens.conf")
+	f := filepath.Join(dir, "loglens.toml")
 	if err := os.WriteFile(f, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -22,9 +22,9 @@ func writeConf(t *testing.T, root, body string) {
 func TestInferRootFromExePath(t *testing.T) {
 	base := t.TempDir()
 
-	// <base>/bin/loglens with <base>/conf present -> root = base
+	// <base>/bin/loglens with <base>/config present -> root = base
 	os.MkdirAll(filepath.Join(base, "bin"), 0o755)
-	os.MkdirAll(filepath.Join(base, "conf"), 0o755)
+	os.MkdirAll(filepath.Join(base, "config"), 0o755)
 	if root, ok := inferRootFromExePath(filepath.Join(base, "bin", "loglens")); !ok || root != base {
 		t.Fatalf("wanted root %q ok=true, got %q ok=%v", base, root, ok)
 	}
@@ -34,11 +34,11 @@ func TestInferRootFromExePath(t *testing.T) {
 		t.Fatal("binary outside bin/ must not infer a root")
 	}
 
-	// bin/ without a conf/ sibling -> no inference (classic mode)
+	// bin/ without a config/ sibling -> no inference (classic mode)
 	other := t.TempDir()
 	os.MkdirAll(filepath.Join(other, "bin"), 0o755)
 	if _, ok := inferRootFromExePath(filepath.Join(other, "bin", "loglens")); ok {
-		t.Fatal("bin/ without conf/ must not infer a root")
+		t.Fatal("bin/ without config/ must not infer a root")
 	}
 }
 

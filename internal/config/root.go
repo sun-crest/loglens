@@ -6,7 +6,7 @@
 //
 //	<root>/
 //	├── bin/loglens      # the static binary; root is inferred from its location
-//	├── conf/loglens.conf
+//	├── config/loglens.toml
 //	└── logs/            # default whitelist target + optional runtime log
 //
 // Moving a whole <root> directory to another host works without touching any
@@ -37,7 +37,7 @@ func ResolveRoot(flagRoot string) string {
 }
 
 // inferRootFromExecutable guesses the workspace root from the running binary:
-// when the binary lives at <root>/bin/loglens and <root>/conf exists, root is
+// when the binary lives at <root>/bin/loglens and <root>/config exists, root is
 // <root>. This is what makes a workspace tree relocatable.
 func inferRootFromExecutable() (string, bool) {
 	exe, err := os.Executable()
@@ -52,14 +52,14 @@ func inferRootFromExecutable() (string, bool) {
 //
 // A binary symlinked into, say, /usr/local/bin resolves to its real path, so
 // the parent check naturally falls through to classic mode when there is no
-// conf/ sibling of the bin/ dir.
+// config/ sibling of the bin/ dir.
 func inferRootFromExePath(exe string) (string, bool) {
 	dir := filepath.Dir(exe)
 	if filepath.Base(dir) != "bin" {
 		return "", false
 	}
 	parent := filepath.Dir(dir)
-	if st, err := os.Stat(filepath.Join(parent, "conf")); err == nil && st.IsDir() {
+	if st, err := os.Stat(filepath.Join(parent, "config")); err == nil && st.IsDir() {
 		return parent, true
 	}
 	return "", false

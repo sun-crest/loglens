@@ -6,8 +6,8 @@
 *.test
 *.out
 
-# 工作区实例配置（模板 conf/loglens.conf.example 会被跟踪）
-/conf/loglens.conf
+# 工作区实例配置（模板 config/loglens.toml.example 会被跟踪）
+/config/loglens.toml
 
 # IDE / 编辑器
 .vscode/

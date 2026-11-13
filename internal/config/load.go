@@ -12,7 +12,7 @@ import (
 
 const (
 	// confFileName is the default configuration file inside the workspace.
-	confFileName = "loglens.conf"
+	confFileName = "loglens.toml"
 
 	// DefaultServeAddr is used when neither the conf file nor a flag sets it.
 	DefaultServeAddr = "127.0.0.1:8787"
@@ -83,25 +83,25 @@ func Load(opts Options) (*Set, error) {
 	if cf.Limits != nil {
 		if v := cf.Limits.MaxLines; v != nil {
 			if *v <= 0 {
-				return nil, fmt.Errorf("loglens.conf: limits.max_lines must be a positive integer, got %d", *v)
+				return nil, fmt.Errorf("loglens.toml: limits.max_lines must be a positive integer, got %d", *v)
 			}
 			cfg.Limits.MaxLines = *v
 		}
 		if v := cf.Limits.MaxBytes; v != nil {
 			if *v <= 0 {
-				return nil, fmt.Errorf("loglens.conf: limits.max_bytes must be a positive integer, got %d", *v)
+				return nil, fmt.Errorf("loglens.toml: limits.max_bytes must be a positive integer, got %d", *v)
 			}
 			cfg.Limits.MaxBytes = *v
 		}
 		if v := cf.Limits.MaxFiles; v != nil {
 			if *v <= 0 {
-				return nil, fmt.Errorf("loglens.conf: limits.max_files must be a positive integer, got %d", *v)
+				return nil, fmt.Errorf("loglens.toml: limits.max_files must be a positive integer, got %d", *v)
 			}
 			cfg.Limits.MaxFiles = *v
 		}
 		if v := cf.Limits.TimeoutMs; v != nil {
 			if *v <= 0 {
-				return nil, fmt.Errorf("loglens.conf: limits.timeout_ms must be a positive integer, got %d", *v)
+				return nil, fmt.Errorf("loglens.toml: limits.timeout_ms must be a positive integer, got %d", *v)
 			}
 			cfg.Limits.Timeout = time.Duration(*v) * time.Millisecond
 		}
@@ -134,7 +134,7 @@ func confPath(root string) string {
 	if root == "" {
 		return ""
 	}
-	p := filepath.Join(root, "conf", confFileName)
+	p := filepath.Join(root, "config", confFileName)
 	if _, err := os.Stat(p); err != nil {
 		return ""
 	}

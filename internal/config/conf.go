@@ -1,6 +1,6 @@
 package config
 
-// confFile mirrors conf/loglens.conf (see conf/loglens.conf.example in the
+// confFile mirrors config/loglens.toml (see config/loglens.toml.example in the
 // repository root for the documented shape). Every field is a pointer: nil
 // means the key is absent from the file, which is exactly the information the
 // merge needs so that a file that sets only some keys does not clobber the
